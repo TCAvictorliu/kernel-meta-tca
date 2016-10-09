@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "FSL pfuze PMIC regulator"
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware imx_anatop.cfg

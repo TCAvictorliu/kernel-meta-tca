@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "imx6 ASoC with wolfson wm8962"
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware imx_wm8962.cfg 
