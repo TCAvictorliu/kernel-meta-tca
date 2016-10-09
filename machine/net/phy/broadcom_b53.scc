@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "enable Broadcom b53 dsa"
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware broadcom_b53.cfg
