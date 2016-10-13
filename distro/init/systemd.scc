@@ -1,0 +1,5 @@
+define KFEATURE_DESCRIPTION "Support Features for Systemd"
+define KFEATURE_COMPATIBILITY all
+
+kconf hardware systemd_mandatory.cfg  
+kconf hardware systemd_recommend.cfg
