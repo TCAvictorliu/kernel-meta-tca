@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "Vivante GC2000/3000 GPU "
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware drm_etnaviv.cfg

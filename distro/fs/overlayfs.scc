@@ -2,4 +2,3 @@ define KFEATURE_DESCRIPTION "Support Features for Rootfs if need"
 define KFEATURE_COMPATIBILITY all
 
 kconf non-hardware overlayfs.cfg
-
