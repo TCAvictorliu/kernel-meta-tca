@@ -1,0 +1,624 @@
+From e5257cac51855260ce9c7a2b5e4a270eb7562bcf Mon Sep 17 00:00:00 2001
+From: "zheng.liu" <zheng.liu@thales-cetca.com>
+Date: Wed, 26 Oct 2016 09:30:23 +0800
+Subject: [PATCH] add tps61195 backlight support
+
+---
+ drivers/video/backlight/Kconfig       |   7 +
+ drivers/video/backlight/Makefile      |   1 +
+ drivers/video/backlight/tps61195.txt  |  26 ++
+ drivers/video/backlight/tps61195_bl.c | 542 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 576 insertions(+)
+ create mode 100644 drivers/video/backlight/tps61195.txt
+ create mode 100644 drivers/video/backlight/tps61195_bl.c
+
+diff --git a/drivers/video/backlight/Kconfig b/drivers/video/backlight/Kconfig
+index 5ffa4b4..18dd954 100644
+--- a/drivers/video/backlight/Kconfig
++++ b/drivers/video/backlight/Kconfig
+@@ -460,6 +460,13 @@ config BACKLIGHT_BD6107
+ 	help
+ 	  If you have a Rohm BD6107 say Y to enable the backlight driver.
+ 
++config BACKLIGHT_TPS61195
++	tristate "TPS61195 Backlight"
++	depends on BACKLIGHT_CLASS_DEVICE && I2C
++	help
++	  If you have a Texas Instruments TPS61195 say Y to enable the
++	  backlight driver.
++
+ endif # BACKLIGHT_CLASS_DEVICE
+ 
+ endif # BACKLIGHT_LCD_SUPPORT
+diff --git a/drivers/video/backlight/Makefile b/drivers/video/backlight/Makefile
+index 16ec534..322ba9a 100644
+--- a/drivers/video/backlight/Makefile
++++ b/drivers/video/backlight/Makefile
+@@ -55,3 +55,4 @@ obj-$(CONFIG_BACKLIGHT_SKY81452)	+= sky81452-backlight.o
+ obj-$(CONFIG_BACKLIGHT_TOSA)		+= tosa_bl.o
+ obj-$(CONFIG_BACKLIGHT_TPS65217)	+= tps65217_bl.o
+ obj-$(CONFIG_BACKLIGHT_WM831X)		+= wm831x_bl.o
++obj-$(CONFIG_BACKLIGHT_TPS61195)	+= tps61195_bl.o
+diff --git a/drivers/video/backlight/tps61195.txt b/drivers/video/backlight/tps61195.txt
+new file mode 100644
+index 0000000..fe15ed6
+--- /dev/null
++++ b/drivers/video/backlight/tps61195.txt
+@@ -0,0 +1,26 @@
++61195 bindings
++Required properties:
++  - compatible: "ti, tps61195 "
++  - reg: I2C slave address (u8)
++  - dev-ctrl: Value of DEVICE CONTROL register(2) (u8). It depends on the device.
++
++Optional properties:
++  - bl-name: Backlight device name (string)
++  - init-brt: Initial value of backlight brightness (u8)
++  - pwm-period: PWM period value. Set only PWM input mode used (u32)
++
++Example:
++the I2D address of tps61195 is 0x59
++the default of brightness is set as 128.
++the mode of tps61195 is seted as SMBus Mode ( The Brightness is set by SMBus command only) 0x02.
++
++
++
++/* tps61195 */
++backlight@59 {
++	compatible = "backlight,tps61195";
++	reg = <0x59>;
++	bl-name = "lcd-bl";
++	dev-ctrl = /bits/ 8 <0x02>;
++	init-brt = /bits/ 8 <0x80>;
++};
+diff --git a/drivers/video/backlight/tps61195_bl.c b/drivers/video/backlight/tps61195_bl.c
+new file mode 100644
+index 0000000..ee9ae98
+--- /dev/null
++++ b/drivers/video/backlight/tps61195_bl.c
+@@ -0,0 +1,542 @@
++/*
++ * TPS61195 Backlight Driver
++ *
++ *			Copyright (C) 2015 CETCA	
++ *
++ * based on lp855x_bl.c
++ * 	
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ * based on lp855x_bl.c
++ */
++
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/i2c.h>
++#include <linux/backlight.h>
++#include <linux/err.h>
++#include <linux/of.h>
++#include <linux/of_gpio.h>
++#include <linux/pwm.h>
++
++/**
++ * struct tps61195_platform_data
++ * @name : Backlight driver name. If it is not defined, default name is set.
++ * @device_control : value of DEVICE CONTROL register
++ * @initial_brightness : initial value of backlight brightness
++ */
++struct tps61195_platform_data {
++	const char *name;
++	u8 device_control;
++	u8 initial_brightness;
++	unsigned int period_ns;
++	int device_active;
++	int sel1;
++	int sel2;
++};
++
++//#define  TPS61195_DEBUG
++
++/* tps61195 SMBUS REGISTER DESCRIPTION 
++  *  The TPS61195 includes four registers to control and monitor the brightness, 
++  *	fault status, operating mode and identification.
++ */
++
++/*Brightness Control Register (0x00),The default value of this register is 0xFF. The
++register returns the current brightness level in the register read cycle.*/
++#define TPS61195_BRIGHTNESS_CTRL		0x00  
++
++/*
++Bit field definitions:
++Bit2 PWM_MD PWM mode select (1 = absolute brightness, 0 = % change) default = 0
++Bit1 PWM_SEL Brightness MUX select (1 = PWM pin, 0 = SMBus value) default = 0
++Bit0 BL_CTL BL On/Off (1 = On, 0 = Off) default = 0
++*/
++#define TPS61195_BL_CTRL		0x01
++
++/* TPS61195 Registers */
++#define TPS61195_BL_MASK		0x01
++#define TPS61195_BL_ON			0x01
++#define TPS61195_BL_OFF			0x00
++
++/*
++Fault/status Register (0x02)
++This register has six status bits that allow monitoring of the backlight controller's operating state. 
++*/
++#define TPS61195_STATUS_CTRL		0x02
++
++/*
++Identification Register (0x03)
++The ID register contains two bit fields to denote the manufacturer and the silicon revision of the device. 
++*/
++#define TPS61195_ID_REGISTER		0x03
++
++#define MANUFACTURE_ID_MSK         0x78
++/*
++  * Manufacturer ID: BIT3 BIT4 BIT5 BIT6
++  * Silicon Rev :  BIT0 BIT1 BIT2
++*/
++
++#define DEFAULT_BL_NAME		"lcd-backlight"
++#define MAX_BRIGHTNESS		255
++
++struct tps61195;
++enum tps61195_brightness_ctrl_mode {
++	PWM_BASED = 0,
++	REGISTER_BASED,
++};
++
++/*
++ * struct tps61195_device_config
++ * @pre_init_device: init device function call before updating the brightness
++ * @reg_brightness: register address for brigthenss control
++ * @reg_devicectrl: register address for device control
++ * @post_init_device: late init device function call
++ */
++struct tps61195_device_config {
++	int (*pre_init_device)(struct tps61195 *);
++	u8 reg_brightness;
++	u8 reg_devicectrl;
++	int (*post_init_device)(struct tps61195 *);
++};
++
++struct tps61195 {
++	const char *chipname;
++	struct tps61195_device_config *cfg;
++	struct i2c_client *client;
++	struct backlight_device *bl;
++	struct device *dev;
++	struct tps61195_platform_data *pdata;
++	struct pwm_device *pwm;
++	enum tps61195_brightness_ctrl_mode mode;
++};
++
++
++static int tps61195_write_byte(struct tps61195 *lp, u8 reg, u8 data)
++{
++	return i2c_smbus_write_byte_data(lp->client, reg, data);
++}
++
++static int tps61195_update_bit(struct tps61195 *lp, u8 reg, u8 mask, u8 data)
++{
++	int ret;
++	u8 tmp;
++	
++	ret = i2c_smbus_read_byte_data(lp->client, reg);
++	if (ret < 0) {
++		dev_err(lp->dev, "failed to read 0x%x\n", reg);
++		return ret;
++	}
++
++	tmp = (u8)ret;
++	tmp &= ~mask;
++	tmp |= data & mask;
++
++	return tps61195_write_byte(lp, reg, tmp);
++}
++
++#ifdef TPS61195_DEBUG
++static int tps61195_read_byte(struct tps61195 *lp,u8 reg, u8 *val)
++{
++	int ret;
++	ret = i2c_smbus_read_byte_data(lp->client, reg);
++	if (ret < 0) {
++		dev_err(lp->dev, "failed reading at 0x%x\n", reg);
++		return ret;
++	}
++
++	*val = ret;
++	return 0;
++}
++#endif
++
++static int tps61195_bl_off(struct tps61195 *lp)
++{
++	/* BL_ON = 0  */
++	return tps61195_update_bit(lp, TPS61195_BL_CTRL, TPS61195_BL_MASK,
++				TPS61195_BL_OFF);
++}
++
++static int tps61195_bl_on(struct tps61195 *lp)
++{
++	/* BL_ON = 1 */
++	return tps61195_update_bit(lp, TPS61195_BL_CTRL, TPS61195_BL_MASK,
++				TPS61195_BL_ON);
++}
++
++
++static struct tps61195_device_config tps61195_dev_cfg = {
++	.reg_brightness = TPS61195_BRIGHTNESS_CTRL,
++	.reg_devicectrl = TPS61195_BL_CTRL,
++	.pre_init_device = tps61195_bl_off,
++	.post_init_device = tps61195_bl_on,
++};
++
++/*
++ * Device specific configuration flow
++ *
++ *    a) pre_init_device(optional)
++ *    b) update the brightness register
++ *    c) update device control register
++ *    d) get the id(optional)
++ *    e) post_init_device(optional)
++ *
++ */
++static int tps61195_configure(struct tps61195 *lp)
++{
++	u8 val = 0;
++	int  ret = 0;
++	struct tps61195_platform_data *pd = lp->pdata;
++
++	lp->cfg = &tps61195_dev_cfg;
++
++	/*backlight off*/
++	if (lp->cfg->pre_init_device) {
++		ret = lp->cfg->pre_init_device(lp);
++		if (ret) {
++			dev_err(lp->dev, "pre init device err: %d\n", ret);
++			goto err;
++		}
++	}
++	
++	/*set default brightness*/
++	val = pd->initial_brightness;
++	ret = tps61195_write_byte(lp, lp->cfg->reg_brightness, val);
++	if (ret)
++	{
++		dev_err(lp->dev, "set default brightness failed \n");
++		goto err;
++	}
++
++	/*set contorl mode of the device*/
++	val = pd->device_control;
++	ret = tps61195_write_byte(lp, lp->cfg->reg_devicectrl, val);
++	if (ret)
++	{
++		dev_err(lp->dev, "set contorl mode err: %d\n", ret);
++		goto err;
++	}
++
++	/*backlight on*/
++	if (lp->cfg->post_init_device) {
++		ret = lp->cfg->post_init_device(lp);
++		if (ret) {
++			dev_err(lp->dev, "post init device err: %d\n", ret);
++			goto err;
++		}
++	}
++	
++	/*dump the registers for test and debug*/
++	#ifdef TPS61195_DEBUG
++	printk(KERN_INFO "tps61195 dump register: ");
++	tps61195_read_byte(lp, 0x0, &val);
++	printk(KERN_INFO "reg0: 0x%x ",val);
++
++	tps61195_read_byte(lp, 0x1, &val);
++	printk(KERN_INFO "reg1: 0x%x ",val);
++	
++	tps61195_read_byte(lp, 0x2, &val);
++	printk(KERN_INFO "reg2: 0x%x ",val);
++	
++	tps61195_read_byte(lp, TPS61195_ID_REGISTER, &val);
++	printk(KERN_INFO "reg3: 0x%x \n",val);
++
++	
++	tps61195_read_byte(lp, 0x0, &val);
++	printk(KERN_INFO "Test for write: before write reg0: 0x%x \n",val);
++	tps61195_write_byte(lp, lp->cfg->reg_brightness, 0x50);
++	tps61195_read_byte(lp, lp->cfg->reg_brightness, &val);
++	printk(KERN_INFO "Test for W/R: after write0x50, reg0: 0x%x \n",val);
++	#endif
++	return 0;
++
++err:
++	return ret;
++}
++
++static void tps61195_pwm_ctrl(struct tps61195 *lp, int br, int max_br)
++{
++	unsigned int period = lp->pdata->period_ns;
++	unsigned int duty = br * period / max_br;
++	struct pwm_device *pwm;
++
++	/* request pwm device with the consumer name */
++	if (!lp->pwm) {
++		pwm = devm_pwm_get(lp->dev, lp->chipname);
++		if (IS_ERR(pwm))
++			return;
++
++		lp->pwm = pwm;
++	}
++	pwm_config(lp->pwm, duty, period);
++	if (duty){
++		pwm_enable(lp->pwm);
++	}
++	else{
++		pwm_disable(lp->pwm);
++	}
++}
++
++static int backlightisoff = 0;
++static int tps61195_bl_update_status(struct backlight_device *bl)
++{
++	struct tps61195 *lp = bl_get_data(bl);
++	int br = 0;
++	int max_br =0;
++	u8 val = 0;
++	
++	if (bl->props.state & BL_CORE_SUSPENDED)
++		bl->props.brightness = 0;
++	
++	if (lp->mode == PWM_BASED) {
++		br = bl->props.brightness;
++		max_br = bl->props.max_brightness;
++		tps61195_pwm_ctrl(lp, br, max_br);
++	} 
++	else if (lp->mode == REGISTER_BASED) {
++		val = bl->props.brightness;
++		tps61195_write_byte(lp, lp->cfg->reg_brightness, val);
++
++		/*if the brightness is 0 and the backlight is on ,set the backlight off.*/
++		if ((val == 0)&& (backlightisoff == 0))
++		{
++			printk(KERN_INFO "Backlight off\n");
++			backlightisoff = 1;
++			tps61195_bl_off(lp);
++		}
++		/*if the brightness is nonzero and the backlight is off, set the backligh on*/
++		else if (( val > 0) && (backlightisoff) )
++		{
++			printk(KERN_INFO "Backlight ON \n");
++			backlightisoff = 0;
++			tps61195_bl_on(lp);
++		}
++		else if ((val == 0)&& (backlightisoff == 1))
++		{
++			printk(KERN_INFO "Backlight is already turn off\n");
++		}
++		else 
++		{
++			/*do nothing*/
++		}
++	}
++
++	return 0;
++}
++
++static int tps61195_bl_get_brightness(struct backlight_device *bl)
++{
++	return bl->props.brightness;
++}
++
++static const struct backlight_ops tps61195_bl_ops = {
++	.options = BL_CORE_SUSPENDRESUME,
++	.update_status = tps61195_bl_update_status,
++	.get_brightness = tps61195_bl_get_brightness,
++};
++
++static int tps61195_backlight_register(struct tps61195 *lp)
++{
++	struct backlight_device *bl;
++	struct backlight_properties props;
++	struct tps61195_platform_data *pdata = lp->pdata;
++	const char *name = pdata->name ? : DEFAULT_BL_NAME;
++
++	props.type = BACKLIGHT_PLATFORM;
++	props.max_brightness = MAX_BRIGHTNESS;
++
++	if (pdata->initial_brightness > MAX_BRIGHTNESS)
++		pdata->initial_brightness = MAX_BRIGHTNESS;
++
++	props.brightness = pdata->initial_brightness;
++	bl = backlight_device_register(name, lp->dev, lp,
++					       &tps61195_bl_ops, &props);
++
++	if (IS_ERR(bl))
++		return PTR_ERR(bl);
++
++	lp->bl = bl;
++	return 0;
++}
++
++static void tps61195_backlight_unregister(struct tps61195 *lp)
++{
++	return;
++	if (lp->bl)
++		backlight_device_unregister(lp->bl);
++}
++
++#ifdef CONFIG_OF
++static int tps61195_parse_dt(struct device *dev, struct device_node *node)
++{
++	struct tps61195_platform_data *pdata;
++	int gpio = 0;
++	int ret = 0;
++
++	if (!node) {
++		dev_err(dev, "no platform data\n");
++		return -EINVAL;
++	}
++
++	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
++	if (!pdata)
++		return -ENOMEM;
++
++	/*en gpio param get and set*/
++	gpio = of_get_named_gpio_flags(node, "en-gpios", 0, (enum of_gpio_flags *)&pdata->device_active);
++	if (!gpio_is_valid(gpio)){
++		printk(KERN_INFO "en-gpios,gpio is in invalid\n");
++		return -ENODEV;
++	}
++	gpio_set_value(gpio,pdata->device_active);
++	
++	/*sel1 param get and gpio set*/
++	gpio= of_get_named_gpio_flags(node, "sel1-gpios", 0, (enum of_gpio_flags *)&pdata->sel1);
++	if (!gpio_is_valid(gpio)){
++		printk(KERN_INFO "sel1-gpios,gpio is in invalid\n");
++		return -ENODEV;
++	}
++
++	ret = gpio_request(gpio, "sel1-gpio");
++	if (ret){
++		pr_err("%s: Could not get GPIO %d", __func__, gpio);
++		return ret;
++	}
++
++	printk(KERN_INFO "tps61195_parse_dt: set gpio-sel1 %d as %d\n",gpio,pdata->sel1);
++	gpio_direction_output(gpio,pdata->sel1);
++	gpio_set_value(gpio,pdata->sel1);
++
++	/*sel2 gpio param get and set*/
++	gpio= of_get_named_gpio_flags(node, "sel2-gpios", 0, (enum of_gpio_flags *)&pdata->sel2);
++	if (!gpio_is_valid(gpio)){
++		printk(KERN_INFO "sel2-gpios,gpio2is invalid\n");
++		return -ENODEV;
++	}
++
++	ret = gpio_request(gpio, "sel2-gpio");
++        if (ret){
++                pr_err("%s: Could not get GPIO %d", __func__, gpio);
++                return ret;
++        }
++	gpio_direction_output(gpio,pdata->sel2);
++	gpio_set_value(gpio,pdata->sel2);
++	printk(KERN_INFO "tps61195_parse_dt: set gpio-sel2 %d as %d\n",gpio,pdata->sel2);
++	
++	/*bl-name, dev-ctrl,brightness and pwm-period param get and gpio set*/
++	of_property_read_string(node, "bl-name", &pdata->name);
++	of_property_read_u8(node, "init-brt", &pdata->initial_brightness);
++	of_property_read_u8(node, "dev-ctrl", &pdata->device_control);
++	of_property_read_u32(node, "pwm-period", &pdata->period_ns);
++	
++	printk(KERN_INFO "tps61195_parse_dt,name %s brightness:%d,control:0x%x,period_ns:%d\n",
++			pdata->name, pdata->initial_brightness, pdata->device_control,pdata->period_ns);
++	
++	dev->platform_data = pdata;
++
++	return 0;
++}
++#else
++static int tps61195_parse_dt(struct device *dev, struct device_node *node)
++{
++	return -EINVAL;
++}
++#endif
++
++static int tps61195_probe(struct i2c_client *cl, const struct i2c_device_id *id)
++{
++	struct tps61195 *lp;
++	struct tps61195_platform_data *pdata = cl->dev.platform_data;
++	struct device_node *node = cl->dev.of_node;
++	int ret;
++	
++	printk(KERN_INFO "tps61195_probe: name:%s \n",id->name);
++	
++	if (!pdata) {
++		ret = tps61195_parse_dt(&cl->dev, node);
++		if (ret < 0)
++			return ret;
++
++		pdata = cl->dev.platform_data;
++	}
++
++	if (!i2c_check_functionality(cl->adapter, I2C_FUNC_SMBUS_I2C_BLOCK))
++		return -EIO;
++	
++	lp = devm_kzalloc(&cl->dev, sizeof(struct tps61195), GFP_KERNEL);
++	if (!lp)
++		return -ENOMEM;
++	
++	if (pdata->period_ns > 0)
++		lp->mode = PWM_BASED;
++	else
++		lp->mode = REGISTER_BASED;
++	
++	lp->client = cl;
++	lp->dev = &cl->dev;
++	lp->pdata = pdata;
++	lp->chipname = id->name;
++	i2c_set_clientdata(cl, lp);
++	
++	ret = tps61195_configure(lp);
++	if (ret) {
++		dev_err(lp->dev, "device config err: %d", ret);
++		goto err_dev;
++	}
++	ret = tps61195_backlight_register(lp);
++	if (ret) {
++		dev_err(lp->dev,
++			"failed to register backlight. err: %d\n", ret);
++		goto err_dev;
++	}
++	
++	backlight_update_status(lp->bl);
++	
++	printk(KERN_INFO "tps61195_probe complete.\n");
++			
++	return 0;
++
++err_sysfs:
++	tps61195_backlight_unregister(lp);
++err_dev:
++	return ret;
++}
++
++static int tps61195_remove(struct i2c_client *cl)
++{
++	struct tps61195 *lp = i2c_get_clientdata(cl);
++
++	lp->bl->props.brightness = 0;
++	backlight_update_status(lp->bl);
++	tps61195_backlight_unregister(lp);
++	return 0;
++}
++
++static const struct of_device_id tps61195_dt_ids[] = {
++	{ .compatible = "backlight,tps61195", },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, tps61195_dt_ids);
++
++static const struct i2c_device_id tps61195_ids[] = {
++	{"tps61195", 0},
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, tps61195_ids);
++
++static struct i2c_driver TPS61195_driver = {
++	.driver = {
++		   .name = "backlight,tps61195",
++		   .of_match_table = of_match_ptr(tps61195_dt_ids),
++		   },
++	.probe = tps61195_probe,
++	.remove = tps61195_remove,
++	.id_table = tps61195_ids,
++};
++
++module_i2c_driver(TPS61195_driver);
++
++MODULE_DESCRIPTION("TPS61195 WLED Backlight driver");
++MODULE_AUTHOR("Andy Huang <zhonglinhuang2008@gamil.com>");
++MODULE_LICENSE("GPL");
+-- 
+2.7.4
+
