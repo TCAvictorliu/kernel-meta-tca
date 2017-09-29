@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "Toshiba TC358870 HDMI to MIPI CSI-2 bridge"
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware toshiba_tc358870/toshiba_tc358870.cfg
