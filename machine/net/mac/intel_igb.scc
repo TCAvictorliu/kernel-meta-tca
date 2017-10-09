@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "Inter IGB 1000M PCIE MAC"
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware inter_igb.cfg
