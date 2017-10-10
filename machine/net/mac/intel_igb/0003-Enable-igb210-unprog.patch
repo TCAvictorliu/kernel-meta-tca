@@ -1,0 +1,103 @@
+From 8347acdceca521643ce50e6497c8fd95a8ee1842 Mon Sep 17 00:00:00 2001
+From: "Victor.Liu" <zheng.liu@thales-cetca.com>
+Date: Tue, 10 Oct 2017 15:20:37 +0800
+Subject: [PATCH] Enable igb210 unprog
+
+---
+ drivers/net/ethernet/intel/igb/e1000_82575.c |  1 +
+ drivers/net/ethernet/intel/igb/e1000_hw.h    |  1 +
+ drivers/net/ethernet/intel/igb/e1000_i210.c  |  9 +--------
+ drivers/net/ethernet/intel/igb/e1000_nvm.c   | 13 +++++++++++--
+ drivers/net/ethernet/intel/igb/igb_main.c    |  1 +
+ 5 files changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.c b/drivers/net/ethernet/intel/igb/e1000_82575.c
+index ee443985581f..aec027afe8e3 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.c
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.c
+@@ -621,6 +621,7 @@ static s32 igb_get_invariants_82575(struct e1000_hw *hw)
+ 	case E1000_DEV_ID_I350_SGMII:
+ 		mac->type = e1000_i350;
+ 		break;
++	case E1000_DEV_ID_I210_UNPROG:
+ 	case E1000_DEV_ID_I210_COPPER:
+ 	case E1000_DEV_ID_I210_FIBER:
+ 	case E1000_DEV_ID_I210_SERDES:
+diff --git a/drivers/net/ethernet/intel/igb/e1000_hw.h b/drivers/net/ethernet/intel/igb/e1000_hw.h
+index 2fb2213cd562..75418c3f3041 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_hw.h
++++ b/drivers/net/ethernet/intel/igb/e1000_hw.h
+@@ -58,6 +58,7 @@ struct e1000_hw;
+ #define E1000_DEV_ID_I350_FIBER			0x1522
+ #define E1000_DEV_ID_I350_SERDES		0x1523
+ #define E1000_DEV_ID_I350_SGMII			0x1524
++#define E1000_DEV_ID_I210_UNPROG		0x1531
+ #define E1000_DEV_ID_I210_COPPER		0x1533
+ #define E1000_DEV_ID_I210_FIBER			0x1536
+ #define E1000_DEV_ID_I210_SERDES		0x1537
+diff --git a/drivers/net/ethernet/intel/igb/e1000_i210.c b/drivers/net/ethernet/intel/igb/e1000_i210.c
+index 07d48f2e3369..90aaed9966d8 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_i210.c
++++ b/drivers/net/ethernet/intel/igb/e1000_i210.c
+@@ -668,14 +668,7 @@ static s32 igb_pool_flash_update_done_i210(struct e1000_hw *hw)
+  **/
+ bool igb_get_flash_presence_i210(struct e1000_hw *hw)
+ {
+-	u32 eec = 0;
+-	bool ret_val = false;
+-
+-	eec = rd32(E1000_EECD);
+-	if (eec & E1000_EECD_FLASH_DETECTED_I210)
+-		ret_val = true;
+-
+-	return ret_val;
++	return false;
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/igb/e1000_nvm.c b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+index 3582c5cf8843..4e2ace3a8126 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_nvm.c
++++ b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+@@ -617,7 +617,7 @@ s32 igb_read_mac_addr(struct e1000_hw *hw)
+ 	u32 rar_high;
+ 	u32 rar_low;
+ 	u16 i;
+-
++#if 0
+ 	rar_high = rd32(E1000_RAH(0));
+ 	rar_low = rd32(E1000_RAL(0));
+ 
+@@ -626,7 +626,16 @@ s32 igb_read_mac_addr(struct e1000_hw *hw)
+ 
+ 	for (i = 0; i < E1000_RAH_MAC_ADDR_LEN; i++)
+ 		hw->mac.perm_addr[i+4] = (u8)(rar_high >> (i*8));
+-
++#else
++	//Get Mac Address form Nor flash
++	 hw->mac.perm_addr[0] = 0x50;
++	 hw->mac.perm_addr[1] = 0x7b;
++	 hw->mac.perm_addr[2] = 0x9d;
++	 hw->mac.perm_addr[3] = 0x4a;
++	 hw->mac.perm_addr[4] = 0x84;
++	 hw->mac.perm_addr[5] = 0xef;
++
++#endif
+ 	for (i = 0; i < ETH_ALEN; i++)
+ 		hw->mac.addr[i] = hw->mac.perm_addr[i];
+ 
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index be456bae8169..b1eee2c55246 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -78,6 +78,7 @@ static const struct pci_device_id igb_pci_tbl[] = {
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I354_SGMII) },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I354_BACKPLANE_2_5GBPS) },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I211_COPPER), board_82575 },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I210_UNPROG), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I210_COPPER), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I210_FIBER), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I210_SERDES), board_82575 },
+-- 
+2.11.0
+
