@@ -1,0 +1,595 @@
+From 9b695ee7b0961245decfce171395370394b6eb3e Mon Sep 17 00:00:00 2001
+From: "Victor.Liu" <zheng.liu@thales-cetca.com>
+Date: Wed, 11 Oct 2017 17:42:46 +0800
+Subject: [PATCH] Toshiba tc358870xbg driver
+
+---
+ drivers/media/i2c/Kconfig    |  10 +
+ drivers/media/i2c/Makefile   |   1 +
+ drivers/media/i2c/tc358870.c | 544 +++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 555 insertions(+)
+ create mode 100644 drivers/media/i2c/tc358870.c
+
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index cee1dae6e014..ef07f0856002 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -330,6 +330,16 @@ config VIDEO_TC358743
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called tc358743.
+ 
++config VIDEO_TC358870
++	tristate "Toshiba TC358870 bridge"
++	depends on I2C
++	select HDMI
++	---help---
++	  Support for the Toshiba TC358870 HDMI to MIPI DSI bridge.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called tc358870.
++
+ config VIDEO_TVP514X
+ 	tristate "Texas Instruments TVP514x video decoder"
+ 	depends on VIDEO_V4L2 && I2C
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index 5bc7bbeb5499..13db6141fad2 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -83,3 +83,4 @@ obj-$(CONFIG_VIDEO_IR_I2C)  += ir-kbd-i2c.o
+ obj-$(CONFIG_VIDEO_ML86V7667)	+= ml86v7667.o
+ obj-$(CONFIG_VIDEO_OV2659)	+= ov2659.o
+ obj-$(CONFIG_VIDEO_TC358743)	+= tc358743.o
++obj-$(CONFIG_VIDEO_TC358870)	+= tc358870.o
+diff --git a/drivers/media/i2c/tc358870.c b/drivers/media/i2c/tc358870.c
+new file mode 100644
+index 000000000000..a58755065402
+--- /dev/null
++++ b/drivers/media/i2c/tc358870.c
+@@ -0,0 +1,544 @@
++/*
++ * tc358870 - Toshiba HDMI to DSI bridge
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/i2c.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
++#include <linux/videodev2.h>
++#include <linux/workqueue.h>
++#include <linux/hdmi.h>
++
++static int debug = 3;
++//module_param(debug, int, 0644);
++//MODULE_PARM_DESC(debug, "debug level (0-3)");
++
++MODULE_DESCRIPTION("Toshiba TC358870 HDMI to Mipi DSI bridge driver");
++MODULE_AUTHOR("Victor Liu <zheng.liu@thalse-cetca.com>");
++MODULE_LICENSE("GPL");
++
++#define EDID_NUM_BLOCKS_MAX 8
++#define EDID_BLOCK_SIZE 128
++
++#define I2C_MAX_XFER_SIZE  (EDID_BLOCK_SIZE + 2)
++
++struct tc358870_state {
++	struct i2c_client	*i2c_client;
++	struct gpio_desc	*reset_gpio;
++	struct clk 		*refclk;
++};
++
++
++static void i2c_rd(struct i2c_client *client, u16 reg, u8 *values, u32 n)
++{
++	int err;
++	u8 buf[2] = { reg >> 8, reg & 0xff };
++	struct i2c_msg msgs[] = {
++		{
++			.addr = client->addr,
++			.flags = 0,
++			.len = 2,
++			.buf = buf,
++		},
++		{
++			.addr = client->addr,
++			.flags = I2C_M_RD,
++			.len = n,
++			.buf = values,
++		},
++	};
++
++	err = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
++	if (err != ARRAY_SIZE(msgs)) {
++		dev_err(&client->dev, "%s: reading register 0x%x from 0x%x failed\n", 
++				__func__, reg, client->addr);
++	}
++}
++
++static void i2c_wr(struct i2c_client *client, u16 reg, u8 *values, u32 n)
++{
++	int err, i;
++	struct i2c_msg msg;
++	u8 data[I2C_MAX_XFER_SIZE];
++
++	if ((2 + n) > I2C_MAX_XFER_SIZE) {
++		n = I2C_MAX_XFER_SIZE - 2;
++		dev_warn(&client->dev, "i2c wr reg=%04x: len=%d is too big!\n",
++			       reg, 2 + n);
++	}
++
++	msg.addr = client->addr;
++	msg.buf = data;
++	msg.len = 2 + n;
++	msg.flags = 0;
++
++	data[0] = reg >> 8;
++	data[1] = reg & 0xff;
++
++	for (i = 0; i < n; i++)
++		data[2 + i] = values[i];
++
++	err = i2c_transfer(client->adapter, &msg, 1);
++	if (err != 1) {
++		dev_err(&client->dev, "%s: writing register 0x%x from 0x%x failed\n",
++				__func__, reg, client->addr);
++		return;
++	}
++
++	if (debug < 3)
++		return;
++
++	switch (n) {
++	case 1:
++		dev_info(&client->dev, "I2C write 0x%04x = 0x%02x",
++				reg, data[2]);
++		break;
++	case 2:
++		dev_info(&client->dev, "I2C write 0x%04x = 0x%02x%02x",
++				reg, data[3], data[2]);
++		break;
++	case 4:
++		dev_info(&client->dev, "I2C write 0x%04x = 0x%02x%02x%02x%02x",
++				reg, data[5], data[4], data[3], data[2]);
++		break;
++	default:
++		dev_info(&client->dev, "I2C write %d bytes from address 0x%04x\n",
++				n, reg);
++	}
++}
++
++static u8 i2c_rd8(struct i2c_client *client, u16 reg)
++{
++	u8 val;
++	i2c_rd(client, reg, &val, 1);
++	return val;
++}
++
++static void i2c_wr8(struct i2c_client *client, u16 reg, u8 val)
++{
++	i2c_wr(client, reg, &val, 1);
++}
++
++static void i2c_wr8_and_or(struct i2c_client *client, u16 reg,
++		u8 mask, u8 val)
++{
++	i2c_wr8(client, reg, (i2c_rd8(client, reg) & mask) | val);
++}
++
++static u16 i2c_rd16(struct i2c_client *client, u16 reg)
++{
++	u16 val;
++	i2c_rd(client, reg, (u8 *)&val, 2);
++	return val;
++}
++
++static void i2c_wr16(struct i2c_client *client, u16 reg, u16 val)
++{
++	i2c_wr(client, reg, (u8 *)&val, 2);
++}
++
++static void i2c_wr16_and_or(struct i2c_client *client, u16 reg, u16 mask, u16 val)
++{
++	i2c_wr16(client, reg, (i2c_rd16(client, reg) & mask) | val);
++}
++
++static u32 i2c_rd32(struct i2c_client *client, u16 reg)
++{
++	u32 val;
++	i2c_rd(client, reg, (u8 *)&val, 4);
++	return val;
++}
++
++static void i2c_wr32(struct i2c_client *client, u16 reg, u32 val)
++{
++	i2c_wr(client, reg, (u8 *)&val, 4);
++}
++
++static void tc358870_initial_setup(struct tc358870_state *state)
++{
++	struct i2c_client *client = state->i2c_client;
++	int sys_freq;
++	static u8 edid_data[256] = {
++		0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
++		0x52, 0x62, 0x88, 0x88, 0x00, 0x88, 0x88, 0x88,
++		0x1c, 0x15, 0x01, 0x03, 0x80, 0x00, 0x00, 0x78,
++		0x0a, 0x0d, 0xc9, 0xa0, 0x57, 0x47, 0x98, 0x27,		//0 - 1f
++		0x12, 0x48, 0x4c, 0x00, 0x00, 0x00, 0x01, 0x01,
++		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
++		0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0xbc, 0x34,
++		0x80, 0x78, 0x70, 0x38, 0x1e, 0x40, 0x28, 0x32,		//20 - 3f
++		0xc8, 0x00, 0xc0, 0x78, 0x00, 0x00, 0x00, 0x1e,
++		0xbc, 0x34, 0x80, 0x78, 0x70, 0x38, 0x1e, 0x40,
++		0x28, 0x32, 0xc8, 0x00, 0xc0, 0x78, 0x00, 0x00,
++		0x00, 0x1e, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x54,		//40 - 5f
++		0x6f, 0x73, 0x68, 0x69, 0x62, 0x61, 0x2d, 0x55,
++		0x48, 0x32, 0x44, 0x0a, 0x00, 0x00, 0x00, 0xfd,
++		0x00, 0x14, 0x78, 0x01, 0xff, 0x1d, 0x00, 0x0a,
++		0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x01, 0x9d,		//60 - 7f
++		0x02, 0x03, 0x1a, 0x40, 0x47, 0x04, 0x13, 0x04,
++		0x04, 0x04, 0x04, 0x04, 0x23, 0x09, 0x07, 0x01,
++		0x83, 0x01, 0x00, 0x00, 0x65, 0x03, 0x0c, 0x00,
++		0x10, 0x00, 0x01, 0x1d, 0x00, 0x72, 0x51, 0xd0,		//80 - 9f
++		0x1e, 0x20, 0x6e, 0x28, 0x55, 0x00, 0xc4, 0x8e,
++		0x21, 0x00, 0x00, 0x1e, 0x01, 0x1d, 0x00, 0x72,
++		0x51, 0xd0, 0x1e, 0x20, 0x6e, 0x28, 0x55, 0x00,
++		0xc4, 0x8e, 0x21, 0x00, 0x00, 0x1e, 0x01, 0x1d, 	//a0 - bf
++		0x00, 0x72, 0x51, 0xd0, 0x1e, 0x20, 0x6e, 0x28,
++		0x55, 0x00, 0xc4, 0x8e, 0x21, 0x00, 0x00, 0x1e,
++		0x01, 0x1d, 0x00, 0x72, 0x51, 0xd0, 0x1e, 0x20,
++		0x6e, 0x28, 0x55, 0x00, 0xc4, 0x8e, 0x21, 0x00,		//c0 - df	
++		0x00, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x47 }; 	//e0 - ff
++
++// Step 1 Software Reset
++i2c_wr16(client,0x0004,0x0004); // ConfCtl0
++i2c_wr16(client,0x0002,0x3F01); // SysCtl
++i2c_wr16(client,0x0002,0x0080); // SysCtl
++i2c_wr16(client,0x0006,0x0008); // ConfCtl1
++i2c_wr16(client,0x0002,0x0000); // SysCtl -> unsleep
++
++// Step 2 Set Ref Clock
++i2c_wr16(client,0x8540,0x12C0); // SYS_FREQ0_1
++i2c_wr8(client,0x8630,0x00); // LOCKDET_FREQ0
++i2c_wr16(client,0x8631,0x0753); // LOCKDET_REF1_2
++i2c_wr8(client,0x8670,0x02); // NCO_F0_MOD
++i2c_wr16(client,0x8A0C,0x12C0); // CSC_SCLK0_1
++
++// Setp 3 HDMI PHY/EDID Control
++i2c_wr8(client,0x8410,0x03); // PHY CTL
++i2c_wr8(client,0x8413,0x3F); // PHY_ENB
++i2c_wr8(client,0x8420,0x07); // EQ_BYPS
++i2c_wr8(client,0x84F0,0x31); // APLL_CTL
++i2c_wr8(client,0x84F4,0x01); // DDCIO_CTL
++i2c_wr8(client,0x8543,0x02); // DDC_CTL
++i2c_wr8(client,0x8A02,0x42); // VOUT_SYNC0
++i2c_wr8(client,0x8544,0x11); // HPD_CTL
++i2c_wr8(client,0x85E0,0x01); // EDID_MODE
++i2c_wr16(client,0x85E3,0x0100); // EDID_LEN1_2
++i2c_wr(client, 0x8C00, edid_data, 64);
++i2c_wr(client, 0x8C40, edid_data + 0x40, 64);
++i2c_wr(client, 0x8C80, edid_data + 0x80, 64);
++i2c_wr(client, 0x8CC0, edid_data + 0xC0, 64);
++i2c_wr8(client,0x854A,0x01); // INIT_END
++
++// Setp 4 Split Control
++i2c_wr16(client,0x5000,0x0100); // STX0_CTL
++i2c_wr16(client,0x500C,0x84E0); // STX0_FPX
++i2c_wr16(client,0x5080,0x0100); // STX1_CTL
++
++// Setp 5 DSI-TX0 Transition Timing
++i2c_wr32(client,0x0108,0x00000001); // DSI_TX_CLKEN
++i2c_wr32(client,0x010C,0x00000001); // DSI_TX_CLKSEL
++i2c_wr16(client,0x0002,0x0001); // ConfCtl1 -> sleep
++mdelay(5);
++i2c_wr32(client,0x02AC,0x000090bf); //820Mbps MIPI_PLL_CNF
++i2c_wr32(client,0x02A0,0x00000003); // MIPI_PLL_CONTROL
++mdelay(10);
++i2c_wr16(client,0x0002,0x0000); // ConfCtl1 -> unsleep
++i2c_wr32(client,0x0118,0x00000014); // LANE_ENABLE
++i2c_wr32(client,0x0120,0x00001770); // LINE_INIT_COUNT
++i2c_wr32(client,0x0124,0x00000000); // HSTX_TO_COUNT
++i2c_wr32(client,0x0128,0x00000101); // FUNC_ENABLE
++i2c_wr32(client,0x0130,0x00010000); // DSI_TATO_COUNT
++i2c_wr32(client,0x0134,0x00005000); // DSI_PRESP_BTA_COUNT
++i2c_wr32(client,0x0138,0x00010000); // DSI_PRESP_LPR_COUNT
++i2c_wr32(client,0x013C,0x00010000); // DSI_PRESP_LPW_COUNT
++i2c_wr32(client,0x0140,0x00010000); // DSI_PRESP_HSR_COUNT
++i2c_wr32(client,0x0144,0x00010000); // DSI_PRESP_HSW_COUNT
++i2c_wr32(client,0x0148,0x00001000); // DSI_PR_TO_COUNT
++i2c_wr32(client,0x014C,0x00010000); // DSI_LRX-H_TO_COUNT
++i2c_wr32(client,0x0150,0x00000161); // FUNC_MODE
++i2c_wr32(client,0x0154,0x00000001); // DSI_RX_VC_ENABLE
++i2c_wr32(client,0x0158,0x000000C8); // IND_TO_COUNT
++i2c_wr32(client,0x0168,0x0000002A); // DSI_HSYNC_STOP_COUNT
++i2c_wr32(client,0x0170,0x000006bc); // APF_VDELAYCNT
++i2c_wr32(client,0x017C,0x00000080); // DSI_TX_MODE
++i2c_wr32(client,0x018C,0x000000ab); // DSI_HSYNC_WIDTH
++i2c_wr32(client,0x0190,0x00000067); // DSI_HBPR
++i2c_wr32(client,0x01A4,0x00000000); // DSI_RX_STATE_INT_MASK
++i2c_wr32(client,0x01C0,0x00000015); // DSI_LPRX_THRESH_COUNT
++i2c_wr32(client,0x0214,0x00000000); // APP_SIDE_ERR_INT_MASK
++i2c_wr32(client,0x021C,0x00000080); // DSI_RX_ERR_INT_MASK
++i2c_wr32(client,0x0224,0x00000000); // DSI_LPTX_INT_MASK
++i2c_wr32(client,0x0254,0x00000006); // LPTXTIMECNT
++i2c_wr32(client,0x0258,0x00280207); // TCLK_HEADERCNT
++i2c_wr32(client,0x025C,0x000f000a); // TCLK_TRAILCNT
++i2c_wr32(client,0x0260,0x00140008); // THS_HEADERCNT
++i2c_wr32(client,0x0264,0x00004268); // TWAKEUPCNT
++i2c_wr32(client,0x0268,0x0000000F); // TCLK_POSTCNT
++i2c_wr32(client,0x026C,0x000D0009); // THS_TRAILCNT
++i2c_wr32(client,0x0270,0x00000020); // HSTXVREGCNT
++i2c_wr32(client,0x0274,0x0000001F); // HSTXVREGEN
++i2c_wr32(client,0x0278,0x00060007); // BTA_COUNT
++i2c_wr32(client,0x027C,0x00000002); // DPHY_TX ADJUST
++i2c_wr32(client,0x011C,0x00000001); // DSITX_START
++
++// Command Transmission Before Video Start
++i2c_wr16(client,0x0500,0x0000); // CMD_SEL
++i2c_wr32(client,0x0110,0x00000006); // MODE_CONFIG
++//i2c_wr32(client,0x0310,0x00000016); // MODE_CONFIG
++// LCD Initialization
++//LCD_INIT();
++//// Soft Reset
++//i2c_wr16(client,0x0504,0x0005); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0001); // DCSCMD_Q
++mdelay(5);
++//// Set Pixel Format
++//i2c_wr16(client,0x0504,0x0015); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x773A); // DCSCMD_Q
++//delay_us(200);
++////// Set Column Address
++////i2c_wr16(client,0x0504,0x8039); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x0005); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x002A); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x0700); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x0080); // DCSCMD_Q
++////delay_us(200);
++////// Set Page Address
++////i2c_wr16(client,0x0504,0x8039); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x0005); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x002B); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x0400); // DCSCMD_Q
++////i2c_wr16(client,0x0504,0x0038); // DCSCMD_Q
++//delay_us(200);
++//// Set Tear On
++//i2c_wr16(client,0x0504,0x0015); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0035); // DCSCMD_Q
++//delay_us(200);
++//// Set Tear Scanline
++//i2c_wr16(client,0x0504,0x8039); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0003); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0044); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0000); // DCSCMD_Q
++//delay_us(200);
++//// Write Display Brightness
++//i2c_wr16(client,0x0504,0x0015); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0xFF51); // DCSCMD_Q
++//delay_us(200);
++//// Write Control Display
++//i2c_wr16(client,0x0504,0x0015); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x2453); // DCSCMD_Q
++//delay_us(200);
++//// Adaptive Brightness Control
++//i2c_wr16(client,0x0504,0x0015); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0155); // DCSCMD_Q
++//delay_us(200);
++//// Exit Sleep
++//i2c_wr16(client,0x0504,0x0005); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0011); // DCSCMD_Q
++//mdelay(120);
++//// MCAP
++//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x00B0); // DCSCMD_Q
++//delay_us(200);
++//// Backlight Control 4
++//i2c_wr16(client,0x0504,0x8029); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0014); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x7DCE); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x4840); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x6756); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x8878); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0xA798); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0xC3B5); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0xDED1); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0xF2E9); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0xFFFA); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0004); // DCSCMD_Q
++
++// HDMI Interrupt Mask, Clear
++//i2c_wr8(client,0x850B,0xFF); // MISC_INT
++//i2c_wr8(client,0x851B,0xFD); // MISC_INTM
++i2c_wr8(client,0x8512,0xff);
++i2c_wr8(client,0x8513,0xff);
++i2c_wr8(client,0x8514,0xff);
++i2c_wr8(client,0x8515,0xff);
++i2c_wr8(client,0x8516,0xff);
++i2c_wr8(client,0x8517,0xff);
++i2c_wr8(client,0x8518,0xff);
++i2c_wr8(client,0x8519,0xff);
++i2c_wr8(client,0x851b,0xff);
++i2c_wr8(client,0x851f,0xff);
++//i2c_wr8(client,0x8502,0xff);
++//i2c_wr8(client,0x8512,0xfe);
++i2c_wr8(client,0x850b,0x00);
++i2c_wr8(client,0x851b,0xff);
++//i2c_wr8(client,0x8514,0x00);
++//i2c_wr8(client,0x8515,0x00);
++//i2c_wr8(client,0x8516,0x00);
++// Interrupt Control (TOP level)
++i2c_wr16(client,0x0014,0x05ff);
++i2c_wr16(client,0x0016,0x05ff);
++//i2c_wr16(client,0x0014,0x0FBF); // IntStatus
++//i2c_wr16(client,0x0016,0x0DBF); // IntMask
++
++// Start Video TX
++i2c_wr16(client,0x0004,0x0C15); // ConfCtl0
++i2c_wr16(client,0x0006,0x0000); // ConfCtl1
++// Command Transmission After Video Start.
++i2c_wr32(client,0x0110,0x00000016); // MODE_CONFIG
++//i2c_wr32(client,0x0310,0x00000016); // MODE_CONFIG
++//mdelay(1000);
++//// MCAP
++//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x00B0); // DCSCMD_Q
++//delay_us(200);
++//// Interface Setting
++//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x14B3); // DCSCMD_Q
++//delay_us(200);
++//// MCAP
++//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x03B0); // DCSCMD_Q
++//delay_us(200);
++
++//mdelay(1000);
++
++i2c_wr16(client,0x0504,0x0032); //	
++i2c_wr16(client,0x0504,0x0000);
++
++//i2c_wr16(client,0x0504,0x0005);
++//i2c_wr16(client,0x0504,0x0011);
++//mdelay(120);
++//// Set Display On
++//i2c_wr16(client,0x0504,0x0005); // DCSCMD_Q
++//i2c_wr16(client,0x0504,0x0029); // DCSCMD_Q
++//mdelay(20);
++
++}
++
++static void tc358870_hdmi_setup(struct tc358870_state *state)
++{
++
++}
++
++static void tc358870_mipi_dsi_setup(struct tc358870_state *state)
++{
++
++}
++
++
++
++static void tc358870_gpio_reset(struct tc358870_state *state)
++{
++	usleep_range(5000, 10000);
++	gpiod_set_value(state->reset_gpio, 1);
++	usleep_range(1000, 2000);
++	gpiod_set_value(state->reset_gpio, 0);
++	msleep(20);
++}
++
++static int tc358870_probe_of(struct tc358870_state *state)
++{	
++	struct device *dev = &state->i2c_client->dev;
++	struct device_node *ep;
++	int ret = -EINVAL;
++
++	state->refclk = devm_clk_get(dev, "refclk");
++	if (IS_ERR(state->refclk)) {
++		if (PTR_ERR(state->refclk) != -EPROBE_DEFER)
++			dev_err(dev, "failed to get refclk: %ld\n",
++				PTR_ERR(state->refclk));
++		return PTR_ERR(state->refclk);
++	}
++
++	state->reset_gpio = devm_gpiod_get_optional(dev, "reset",
++						    GPIOD_OUT_LOW);
++	if (IS_ERR(state->reset_gpio)) {
++		dev_err(dev, "failed to get reset gpio\n");
++		ret = PTR_ERR(state->reset_gpio);
++		return ret;
++	}
++
++	if (state->reset_gpio)
++		tc358870_gpio_reset(state);
++
++	return 0;
++}
++
++static int tc358870_probe(struct i2c_client *client,
++			  const struct i2c_device_id *id)
++{
++	struct tc358870_state *state;
++	int err;
++	
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
++		return -EIO;
++	
++	state = devm_kzalloc(&client->dev, sizeof(struct tc358870_state),
++			GFP_KERNEL);
++	if (!state)
++		return -ENOMEM;
++	
++	state->i2c_client = client;
++	
++	if(i2c_rd16(client, 0x0000) != 0x4700){
++		dev_info(&client->dev, "not a TC358870 on address 0x%x\n",
++			  client->addr << 1);
++		return -ENODEV;			
++	}
++
++	err = tc358870_probe_of(state);
++	if (err == -ENODEV)
++		dev_err(&client->dev, "No Device Tree data!\n");
++	if (err) 
++		return err;
++
++#if 0	
++	err = devm_request_threaded_irq(&client->dev, client->irq, NULL, 
++			tc358870_irq_handler,
++			IRQF_ONESHOT,
++			client->name, data);
++	if (err)
++		return err;
++#endif
++
++	tc358870_initial_setup(state);
++
++	dev_info(&client->dev, "%s found @ 0x%x (%s)\n", client->name,
++		  client->addr << 1, client->adapter->name);
++
++	return 0;
++		
++}
++
++static int tc358870_remove(struct i2c_client *client)
++{
++#if 0
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct tc358870_state *state = to_state(sd);
++
++	cancel_delayed_work(&state->delayed_work_enable_hotplug);
++	v4l2_async_unregister_subdev(sd);
++	v4l2_device_unregister_subdev(sd);
++	mutex_destroy(&state->confctl_mutex);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(&state->hdl);
++#endif
++
++	return 0;
++}
++
++static struct i2c_device_id tc358870_id[] = {
++	{"tc358870", 0},
++	{}
++};
++
++MODULE_DEVICE_TABLE(i2c, tc358870_id);
++
++static struct i2c_driver tc358870_driver = {
++	.driver = {
++		.name = "tc358870",
++	},
++	.probe = tc358870_probe,
++	.remove = tc358870_remove,
++	.id_table = tc358870_id,
++};
++
++module_i2c_driver(tc358870_driver);
+-- 
+2.11.0
+
