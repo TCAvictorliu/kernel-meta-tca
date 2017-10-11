@@ -1,0 +1,4 @@
+define KFEATURE_DESCRIPTION "eim nor flash support"
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware eimnor.cfg 
