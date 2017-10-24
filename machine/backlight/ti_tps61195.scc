@@ -3,3 +3,4 @@ define KFEATURE_COMPATIBILITY board
 
 kconf hardware ti_tps61195/ti_tps61195.cfg
 patch ti_tps61195/0001-add-tps61195-backlight-support.patch
+patch ti_tps61195/0002-fix-Backlight-for-BOE-screen.patch

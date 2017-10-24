@@ -1,0 +1,70 @@
+From f445089a1c6da301ceec829ad468a7f89829fab9 Mon Sep 17 00:00:00 2001
+From: "Victor.Liu" <zheng.liu@thales-cetca.com>
+Date: Tue, 24 Oct 2017 15:54:55 +0800
+Subject: [PATCH] fix Backlight for BOE screen
+
+---
+ drivers/video/backlight/tps61195_bl.c | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/video/backlight/tps61195_bl.c b/drivers/video/backlight/tps61195_bl.c
+index ee9ae98e6faa..9170cc158c9b 100644
+--- a/drivers/video/backlight/tps61195_bl.c
++++ b/drivers/video/backlight/tps61195_bl.c
+@@ -15,6 +15,7 @@
+ #include <linux/slab.h>
+ #include <linux/i2c.h>
+ #include <linux/backlight.h>
++#include <linux/delay.h>
+ #include <linux/err.h>
+ #include <linux/of.h>
+ #include <linux/of_gpio.h>
+@@ -382,14 +383,6 @@ static int tps61195_parse_dt(struct device *dev, struct device_node *node)
+ 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
+ 	if (!pdata)
+ 		return -ENOMEM;
+-
+-	/*en gpio param get and set*/
+-	gpio = of_get_named_gpio_flags(node, "en-gpios", 0, (enum of_gpio_flags *)&pdata->device_active);
+-	if (!gpio_is_valid(gpio)){
+-		printk(KERN_INFO "en-gpios,gpio is in invalid\n");
+-		return -ENODEV;
+-	}
+-	gpio_set_value(gpio,pdata->device_active);
+ 	
+ 	/*sel1 param get and gpio set*/
+ 	gpio= of_get_named_gpio_flags(node, "sel1-gpios", 0, (enum of_gpio_flags *)&pdata->sel1);
+@@ -449,7 +442,7 @@ static int tps61195_probe(struct i2c_client *cl, const struct i2c_device_id *id)
+ 	struct tps61195 *lp;
+ 	struct tps61195_platform_data *pdata = cl->dev.platform_data;
+ 	struct device_node *node = cl->dev.of_node;
+-	int ret;
++	int ret,en_gpio;
+ 	
+ 	printk(KERN_INFO "tps61195_probe: name:%s \n",id->name);
+ 	
+@@ -493,6 +486,21 @@ static int tps61195_probe(struct i2c_client *cl, const struct i2c_device_id *id)
+ 	
+ 	backlight_update_status(lp->bl);
+ 	
++	/*en gpio param get and set*/
++	en_gpio = of_get_named_gpio_flags(node, "en-gpios", 0, (enum of_gpio_flags *)&pdata->device_active);
++	if (!gpio_is_valid(en_gpio)){
++		printk(KERN_INFO "en-gpios,gpio is in invalid\n");
++		return -ENODEV;
++	}
++	gpio_request(en_gpio, "en-gpios");
++	pdata->device_active &= ~OF_GPIO_ACTIVE_LOW;
++	gpio_direction_output(en_gpio, pdata->device_active);
++
++	mdelay(50);
++	
++	pdata->device_active |= OF_GPIO_ACTIVE_LOW;   
++	gpio_direction_output(en_gpio, pdata->device_active);
++	
+ 	printk(KERN_INFO "tps61195_probe complete.\n");
+ 			
+ 	return 0;
+-- 
+2.11.0
+
