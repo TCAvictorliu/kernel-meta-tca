@@ -1,0 +1,258 @@
+From 8284833ab4d3736327f6c0dc3f0e2d8a8af4f560 Mon Sep 17 00:00:00 2001
+From: "andy.huang" <andy.huang@thales-cetca.com>
+Date: Tue, 7 Nov 2017 11:00:55 +0800
+Subject: [PATCH 11/11] Add pwm for hardware watchdog
+
+---
+ drivers/pwm/Kconfig    |   7 ++
+ drivers/pwm/Makefile   |   1 +
+ drivers/pwm/pwm-wdog.c | 207 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 215 insertions(+)
+ create mode 100755 drivers/pwm/pwm-wdog.c
+
+diff --git a/drivers/pwm/Kconfig b/drivers/pwm/Kconfig
+index 42e37c2..e44e0c7 100644
+--- a/drivers/pwm/Kconfig
++++ b/drivers/pwm/Kconfig
+@@ -207,6 +207,13 @@ config PWM_IMX
+ 
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called pwm-imx.
++config  PWM_WDOG
++        tristate "CMT mainboard hardware watch dog PWM support"
++        help
++          PWM driver support for the hardware watchdog controller found on CMT mainboard
++
++          To compile this driver as a module, choose M here: the module
++          will be called pwm-wdog.
+ 
+ config PWM_JZ4740
+ 	tristate "Ingenic JZ4740 PWM support"
+diff --git a/drivers/pwm/Makefile b/drivers/pwm/Makefile
+index 346a83b..49306a0 100644
+--- a/drivers/pwm/Makefile
++++ b/drivers/pwm/Makefile
+@@ -18,6 +18,7 @@ obj-$(CONFIG_PWM_FSL_FTM)	+= pwm-fsl-ftm.o
+ obj-$(CONFIG_PWM_HIBVT)		+= pwm-hibvt.o
+ obj-$(CONFIG_PWM_IMG)		+= pwm-img.o
+ obj-$(CONFIG_PWM_IMX)		+= pwm-imx.o
++obj-$(CONFIG_PWM_WDOG)          += pwm-wdog.o
+ obj-$(CONFIG_PWM_JZ4740)	+= pwm-jz4740.o
+ obj-$(CONFIG_PWM_LP3943)	+= pwm-lp3943.o
+ obj-$(CONFIG_PWM_LPC18XX_SCT)	+= pwm-lpc18xx-sct.o
+diff --git a/drivers/pwm/pwm-wdog.c b/drivers/pwm/pwm-wdog.c
+new file mode 100755
+index 0000000..82558ee
+--- /dev/null
++++ b/drivers/pwm/pwm-wdog.c
+@@ -0,0 +1,207 @@
++/*
++ * linux/drivers/pwm_wdog.c
++ *
++ * simple PWM based watchdog control, board code has to setup
++ * 1) pin configuration so PWM waveforms can output
++ * 2) platform_data being correctly configured
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/gpio.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/platform_device.h>
++#include <linux/pwm.h>
++#include <linux/slab.h>
++#include <linux/delay.h>
++
++struct pwm_wdog_data {
++	struct pwm_device	*pwm;
++	unsigned long		period;
++};
++
++static struct pwm_wdog_data *wdog;
++
++#define HZ_TO_NANOSECONDS(x) (1000000000UL/(x))
++static int pwm_wdog_probe(struct platform_device *pdev)
++{
++	unsigned long pwm_id = (unsigned long)pdev->dev.platform_data;
++	//struct pwm_wdog_data *wdog;
++	int error = 0;
++	unsigned int value = 1000;
++	unsigned int period = 0;
++	struct device_node *node = pdev->dev.of_node;
++	
++	wdog = kzalloc(sizeof(*wdog), GFP_KERNEL);
++	if (!wdog)
++		return -ENOMEM;
++	
++	printk(KERN_INFO "pwm_wdog_probe() enter.\n");
++	wdog->pwm = pwm_get(&pdev->dev, NULL);
++	if (IS_ERR(wdog->pwm)) {
++		dev_dbg(&pdev->dev, "unable to request PWM, trying legacy API\n");
++		printk(KERN_ERR "unable to request PWM, trying legacy API\n");
++		wdog->pwm = pwm_request(pwm_id, "pwm-wdog");
++	}
++	
++	if (IS_ERR(wdog->pwm)) {
++		error = PTR_ERR(wdog->pwm);
++		dev_err(&pdev->dev, "Failed to request pwm device: %d\n", error);
++		printk(KERN_ERR "Failed to request pwm device: %d\n",error);
++		goto err_free;
++	}
++	platform_set_drvdata(pdev, wdog);
++
++	/*get the period from the dts*/
++	if (!node){
++		printk(KERN_ERR "Failed to find  pwm of_node, use the default period 1000.\n");
++	}
++	else
++	{
++		/* determine the  period of watchdog pwm2 */
++		error = of_property_read_u32(node, "period-value",&value);
++		if (error < 0){
++			printk(KERN_ERR "Failed to find  period-value,use the default period 1000.\n");
++			value = 1000;
++		}
++		else
++		{
++			printk(KERN_INFO "find period-value %d.\n",value);
++		}
++	}
++	
++	period = HZ_TO_NANOSECONDS(value);
++	error = pwm_config(wdog->pwm, period/2, period);
++	if (error){
++		printk(KERN_ERR "Failed to config pwm device: %d\n",error);
++		goto err_free;
++	}
++	
++	msleep(10);
++	error = pwm_enable(wdog->pwm);
++	if (error){
++		printk(KERN_ERR "Failed to enable pwm device: %d\n",error);
++		goto err_free;
++	}
++	printk(KERN_INFO "pwm_wdog_probe() complete.\n");
++	return 0;
++	
++	err_free:
++	kfree(wdog);
++	
++	return error;
++}
++
++static int pwm_wdog_remove(struct platform_device *pdev)
++{
++	struct pwm_wdog_data *wdog = platform_get_drvdata(pdev);
++
++	platform_set_drvdata(pdev, NULL);
++	pwm_disable(wdog->pwm);
++	pwm_free(wdog->pwm);
++
++	kfree(wdog);
++	return 0;
++}
++
++#ifdef CONFIG_PM
++static int pwm_wdog_suspend(struct device *dev)
++{
++	struct  pwm_wdog_data *wdog = dev_get_drvdata(dev);
++
++	if (wdog->period)
++		pwm_disable(wdog->pwm);
++
++	return 0;
++}
++
++static int pwm_wdog_resume(struct device *dev)
++{
++	struct pwm_wdog_data *wdog = dev_get_drvdata(dev);
++
++	if (wdog->period) {
++		pwm_config(wdog->pwm, wdog->period / 2, wdog->period);
++		pwm_enable(wdog->pwm);
++	}
++
++	return 0;
++}
++
++static SIMPLE_DEV_PM_OPS(pwm_wdog_pm_ops,
++			 pwm_wdog_suspend, pwm_wdog_resume);
++
++#define PWM_WDOG_PM_OPS (&pwm_wdog_pm_ops)
++
++#else
++#define PWM_WDOG_PM_OPS NULL
++#endif
++
++#ifdef CONFIG_OF
++static const struct of_device_id pwm_wdog_match[] = {
++	{ .compatible = "pwm-wdog", },
++	{ },
++};
++#endif
++
++static struct platform_driver pwm_wdog_driver = {
++	.probe	= pwm_wdog_probe,
++	.remove = pwm_wdog_remove,
++	.driver = {
++		.name	= "pwm-wdog",
++		.owner	= THIS_MODULE,
++		.pm	= PWM_WDOG_PM_OPS,
++		.of_match_table = of_match_ptr(pwm_wdog_match),
++	},
++};
++
++/*add the pwd_watchdog in the debugfs to test the hardware watchdog.*/
++#include <linux/debugfs.h>
++
++static struct dentry *pwm_watchdog_stats_dentry;
++
++static int pwm_watchdog_stats_show(struct seq_file *m, void *unused)
++{
++	return 0;
++}
++
++static int pwm_watchdog_stats_open(struct inode *inode, struct file *file)
++{
++	if ( wdog != NULL)
++	{	
++		printk(KERN_INFO "pwm_wdog_suspend for hardware watchdog test, please wait for the system to reboot.\n");
++		pwm_disable(wdog->pwm);
++	}
++	else
++	{	
++		printk(KERN_ERR "pwm wdog can't be suspend.\n");
++	}
++
++	return single_open(file, pwm_watchdog_stats_show, NULL);
++}
++
++static const struct file_operations hardware_watchdog_stats_fops = {
++	.owner = THIS_MODULE,
++	.open = pwm_watchdog_stats_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++static int __init pwm_wdog_debugfs_init(void)
++{
++	pwm_watchdog_stats_dentry = debugfs_create_file("pwm_watchdog",
++			S_IRUGO, NULL, NULL, &hardware_watchdog_stats_fops);
++	return 0;
++}
++
++postcore_initcall(pwm_wdog_debugfs_init);
++
++module_platform_driver(pwm_wdog_driver);
++
++MODULE_DESCRIPTION("PWM based wdog Driver");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("platform:pwm-wdog");
++
+-- 
+1.9.1
+
