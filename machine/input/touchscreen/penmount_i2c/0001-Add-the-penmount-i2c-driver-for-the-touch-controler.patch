@@ -1,0 +1,1037 @@
+From 7991d21555ee47d4e7dd582763a26a941d920a78 Mon Sep 17 00:00:00 2001
+From: "andy.huang" <andy.huang@thales-cetca.com>
+Date: Tue, 24 Oct 2017 11:46:59 +0800
+Subject: [PATCH 5/5] Add the penmount i2c driver for the touch controler
+
+---
+ drivers/input/touchscreen/Kconfig        |  12 +
+ drivers/input/touchscreen/Makefile       |   1 +
+ drivers/input/touchscreen/penmount-i2c.c | 981 +++++++++++++++++++++++++++++++
+ 3 files changed, 994 insertions(+)
+ create mode 100644 drivers/input/touchscreen/penmount-i2c.c
+
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index cf26ca4..7094fa2 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -615,6 +615,18 @@ config TOUCHSCREEN_PENMOUNT
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called penmount.
+ 
++config TOUCHSCREEN_PENMOUNT_I2C
++        tristate "Penmount I2C touchscreen"
++        depends on I2C
++        help
++          Say Y here if you have a Penmount I2C touchscreen connected to
++          your system.
++
++          If unsure, say N.
++
++          To compile this driver as a module, choose M here: the
++          module will be called penmount.
++
+ config TOUCHSCREEN_EDT_FT5X06
+ 	tristate "EDT FocalTech FT5x06 I2C Touchscreen support"
+ 	depends on I2C
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index 18e4769..6b4fa9a 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -61,6 +61,7 @@ obj-$(CONFIG_TOUCHSCREEN_HTCPEN)	+= htcpen.o
+ obj-$(CONFIG_TOUCHSCREEN_USB_COMPOSITE)	+= usbtouchscreen.o
+ obj-$(CONFIG_TOUCHSCREEN_PCAP)		+= pcap_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_PENMOUNT)	+= penmount.o
++obj-$(CONFIG_TOUCHSCREEN_PENMOUNT_I2C)  += penmount-i2c.o
+ obj-$(CONFIG_TOUCHSCREEN_PIXCIR)	+= pixcir_i2c_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_RM_TS)		+= raydium_i2c_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_S3C2410)	+= s3c2410_ts.o
+diff --git a/drivers/input/touchscreen/penmount-i2c.c b/drivers/input/touchscreen/penmount-i2c.c
+new file mode 100644
+index 0000000..50bac72
+--- /dev/null
++++ b/drivers/input/touchscreen/penmount-i2c.c
+@@ -0,0 +1,981 @@
++/*
++ *  I2C driver for PenMount touchscreens
++ *
++ *  Copyright (c) 2017 John Sung <penmount <at> seed.net.tw>
++ *
++ */
++
++/*
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 2 of the License, or (at your option)
++ * any later version.
++ */
++
++#include <linux/module.h>
++#include <linux/version.h>
++#include <linux/delay.h>
++#include <linux/hrtimer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
++#include <linux/input/mt.h>
++#endif
++#include <linux/interrupt.h>
++#include <linux/slab.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25)
++#include <linux/gpio.h> // for gpio_to_irq()
++#endif
++#ifdef CONFIG_ANDROID
++#include <linux/earlysuspend.h>
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 30)
++#error Unsupported linux versions
++#endif
++////////////////////////////////////////////////////////
++#define PENMOUNT_I2C_SLAVEADDR                          0x38
++#define PENMOUNT_I2C_GPIO_NAME                          "PMI2CINT"
++#if defined(CONFIG_MACH_AM335XEVM)
++#define GPIO_TO_PIN(bank, gpio) (32 * (bank) + (gpio))
++#define PENMOUNT_I2C_GPIO_IRQ                           GPIO_TO_PIN(3,19)
++#endif
++////////////////////////////////////////////////////////
++#define PENMOUNT_I2C_POLL_INTERVAL                      (10*1000*1000) //10ms
++#define PENMOUNT_I2C_DRIVERNAME                         "penmount_i2c"
++//------------------------------------------------------
++#define PENMOUNT_VENDOR_ID                              0x14E1
++#define PENMOUNT_MODEL_P2                               0x3500
++#define PENMOUNT_P2_MAX_CONTACT                         5
++#define PENMOUNT_P2_RESOLUTION                          0x7FF
++#define PENMOUNT_P2_INVALID_DATA                        0xEE
++#define PENMOUNT_P2_TOUCHFLAG_TOUCH                     0x70
++#define PENMOUNT_P2_TOUCHFLAG_RELEASE                   0x40
++#define PENMOUNT_P2_TOUCHFLAG_MASK                      0xF0
++#define PENMOUNT_P2_CONTACTID_MASK                      0x0F
++#define PENMOUNT_CMD_PACKET_SIZE                        6
++#define PENMOUNT_MAX_PACKET_SIZE                        64
++#define PENMOUNT_MTPROTO_NONE                           0
++#define PENMOUNT_MTPROTO_A                              1
++#define PENMOUNT_MTPROTO_B                              2
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
++#define PENMOUNT_MTPROTO                                PENMOUNT_MTPROTO_B
++#else
++#define PENMOUNT_MTPROTO                                PENMOUNT_MTPROTO_NONE
++#endif
++
++#define PENMOUNT_USE_IRQ                                1
++//------------------------------------------------------
++// Version Information
++//------------------------------------------------------
++#ifndef PMDRIVER_MAJORVER
++#define PMDRIVER_MAJORVER 1
++#define PMDRIVER_MINORVER 15
++#define PMDRIVER_BUILDVER 4
++#define PMDRIVER_REVISION 1
++#define PMDRIVER_VERSION  ((PMDRIVER_MAJORVER<<8)|(PMDRIVER_MINORVER<<4)|PMDRIVER_BUILDVER)
++#endif
++//------------------------------------------------------
++////////////////////////////////////////////////////////
++int debug_level = 0;
++module_param_named(debug, debug_level, int, S_IWUSR | S_IWGRP | S_IRUSR | S_IRGRP | S_IROTH);
++////////////////////////////////////////////////////////
++struct penmount_i2c
++{
++	struct i2c_client *driver;
++	struct hrtimer timer;
++	struct irq_desc *desc;
++	struct work_struct work;
++	struct mutex mutex;
++	unsigned char read_length;
++	unsigned char sync_mode;
++	unsigned char use_read_thread;
++	int irq;
++	int gpio_irq;
++};
++//------------------------------------------------------
++struct mt_slot {
++	unsigned short x, y;
++	bool active; /* is the touch valid? */
++};
++//------------------------------------------------------
++struct penmount
++{
++	struct input_dev *touchdev;
++	int idx;
++	unsigned char data[PENMOUNT_MAX_PACKET_SIZE];
++	char phys[32];
++	unsigned char reportsize;
++	unsigned char maxcontacts;
++	struct mt_slot slots[PENMOUNT_P2_MAX_CONTACT];
++	void (*parse_report)(struct penmount *);
++	unsigned char report_size;
++	unsigned char CMD;
++	unsigned char ACK[5];
++	unsigned char raw_mode;
++	struct penmount_i2c i2c;
++#ifdef CONFIG_ANDROID
++	struct early_suspend early_suspend;
++#endif
++};
++////////////////////////////////////////////////////////
++static int penmount_i2c_read_report(struct penmount *, unsigned char *);
++static void penmount_i2c_parse_report(struct penmount *, unsigned char *);
++int penmount_i2c_send_command(struct penmount *, int, unsigned char *, unsigned char *);
++////////////////////////////////////////////////////////
++// Input Events
++////////////////////////////////////////////////////////
++#if (PENMOUNT_MTPROTO == PENMOUNT_MTPROTO_B)
++static void penmount_mtevent(struct penmount *penmount, struct input_dev *input)
++{
++	// Linux MT Protocol Type B
++	int i;
++
++	for (i = 0; i < penmount->maxcontacts; ++i) {
++		input_mt_slot(input, i);
++		input_mt_report_slot_state(input, MT_TOOL_FINGER, penmount->slots[i].active);
++		if (penmount->slots[i].active) {
++			input_event(input, EV_ABS, ABS_MT_POSITION_X, penmount->slots[i].x);
++			input_event(input, EV_ABS, ABS_MT_POSITION_Y, penmount->slots[i].y);
++		}
++	}
++
++	input_mt_report_pointer_emulation(input, true);
++	input_sync(input);
++}
++#else
++//------------------------------------------------------
++static void penmount_input(struct penmount *penmount, struct input_dev *input) {
++	input_report_abs(input, ABS_X, penmount->slots[0].x);
++	input_report_abs(input, ABS_Y, penmount->slots[0].y);
++	input_report_key(input, BTN_TOUCH, penmount->slots[0].active);
++	input_sync(input);
++}
++#endif
++////////////////////////////////////////////////////////
++// IRQ Functions
++////////////////////////////////////////////////////////
++// irq -> triggered -> poll until no more data.
++//------------------------------------------------------
++static
++void penmount_i2c_do_read_work(struct work_struct *work) {
++	int rc = 0;
++	struct penmount_i2c *i2c = NULL;
++	struct penmount *penmount = NULL;
++	unsigned char buffer[64];
++
++	i2c = container_of(work, struct penmount_i2c, work);
++	penmount = i2c_get_clientdata(i2c->driver);
++
++	mutex_lock(&penmount->i2c.mutex);
++
++	rc = penmount_i2c_read_report(penmount, buffer);
++	if (rc == 0) {
++		// TODO: A touch report
++		penmount_i2c_parse_report(penmount, buffer);
++		// schedule work to start read again.
++		schedule_work(&penmount->i2c.work);
++	} else {
++#if PENMOUNT_USE_IRQ
++		if (penmount->i2c.driver->irq) {
++			// No more data to read, re-enable irq
++			enable_irq(penmount->i2c.driver->irq);
++		} else if (penmount->i2c.use_read_thread)
++#endif
++		{
++			hrtimer_start(&penmount->i2c.timer, ktime_set(0, PENMOUNT_I2C_POLL_INTERVAL), HRTIMER_MODE_REL);
++		}
++	}
++
++	mutex_unlock(&penmount->i2c.mutex);
++
++	return;
++}
++//------------------------------------------------------
++static
++enum hrtimer_restart penmount_i2c_polldata(struct hrtimer *timer) {
++	struct penmount_i2c *i2c = NULL;
++	struct penmount *penmount = NULL;
++
++	i2c = container_of(timer, struct penmount_i2c, timer);
++	penmount = i2c_get_clientdata(i2c->driver);
++
++	schedule_work(&penmount->i2c.work);
++
++	return HRTIMER_NORESTART;
++}
++//------------------------------------------------------
++#if 0
++static
++irqreturn_t penmount_i2c_interrupt(int irq, void *dev_id) {
++	struct i2c_client *client = NULL;
++	struct penmount *penmount = NULL;
++	unsigned char buffer[64] = {0};
++
++	client = (struct i2c_client *)dev_id;
++	penmount = i2c_get_clientdata(client);
++
++	if (!penmount_i2c_read_report(penmount, buffer)) {
++		// TODO: A touch report
++		penmount_i2c_parse_report(penmount, buffer);
++	}
++
++	return IRQ_HANDLED;
++}
++#else
++//------------------------------------------------------
++static
++irqreturn_t penmount_i2c_interrupt(int irq, void *dev_id) {
++	struct i2c_client *client = NULL;
++	struct penmount *penmount = NULL;
++
++	client = (struct i2c_client *)dev_id;
++	penmount = i2c_get_clientdata(client);
++
++	// Disable interrupt and read until no more data.
++	disable_irq_nosync(client->irq);
++	schedule_work(&penmount->i2c.work);
++
++	return IRQ_HANDLED;
++}
++#endif
++////////////////////////////////////////////////////////
++// I2C Functions
++////////////////////////////////////////////////////////
++int penmount_i2c_write(struct i2c_client *client,
++			int length,
++			unsigned char *buffer) {
++	int ret = -1;
++	struct i2c_msg msg[1];
++
++	msg[0].addr = client->addr;
++	msg[0].flags = 0; //Write
++	msg[0].len = length;
++	msg[0].buf = (unsigned char *) buffer;
++
++	ret = i2c_transfer(client->adapter, msg, 1);
++
++	if (debug_level > 3) {
++		int i = 0;
++		printk ("[PENMOUNT] Write [0x%02X] (%d) : ", client->addr, length);
++		for (i=0; i<length; i++) {
++			printk ("[0x%02X]", buffer[i]);
++		}
++		printk (" (%d)\n", ret);
++	}
++
++	return ret;
++}
++//------------------------------------------------------
++int penmount_i2c_read(struct i2c_client *client,
++			int length,
++			unsigned char *buffer) {
++	struct penmount *penmount = NULL;
++	int rc = 0;
++	struct i2c_msg msg[1];
++	int i=0;
++	int retry = 0;
++
++	penmount = i2c_get_clientdata(client);
++
++	memset (buffer, 0, length);
++
++	msg[0].addr = client->addr;
++	msg[0].flags = I2C_M_RD | I2C_M_IGNORE_NAK ; // Read
++
++	if ((penmount->i2c.read_length == 1)
++		||(penmount->i2c.sync_mode)) {
++		msg[0].len = 1;
++		// Retry until it reads the expected data as the first byte of report.
++		for(retry=0; retry<penmount->report_size*2; retry++) {
++			msg[0].buf = buffer;
++			if (i2c_transfer(client->adapter, msg, 1) <= 0) {
++				rc = -1;
++			}
++			if (debug_level > 4) {
++				printk ("[PENMOUNT] Sync Read [0x%02X] (%d) : [0x%02X] / [0x%02X]\n", client->addr, rc, buffer[0], penmount->CMD);
++			}
++			if ( (penmount->CMD) && (buffer[0] == penmount->CMD) ) {
++				break;
++			} else {
++				if (((buffer[0] & PENMOUNT_P2_TOUCHFLAG_MASK) == PENMOUNT_P2_TOUCHFLAG_TOUCH)
++					||((buffer[0] & PENMOUNT_P2_TOUCHFLAG_MASK) == PENMOUNT_P2_TOUCHFLAG_RELEASE)) {
++					break;
++				}
++			}
++		}
++		if (retry == penmount->report_size*2) {
++			if (debug_level > 4) {
++				printk ("[PENMOUNT] Sync Read Failed !\n");
++			}
++			return -1;
++		}
++	}
++
++	if (penmount->i2c.read_length == 1) {
++		msg[0].len = 1;
++		for(i=1; i<length; i++) {
++			msg[0].buf = buffer+i;
++			if (i2c_transfer(client->adapter, msg, 1) <= 0) {
++				rc = -1;
++			}
++		}
++	} else {
++		if (penmount->i2c.sync_mode) {
++			msg[0].len = length-1;
++			msg[0].buf = buffer+1;
++			penmount->i2c.sync_mode = 0;
++		} else {
++			msg[0].len = length;
++			msg[0].buf = buffer;
++		}
++		if (i2c_transfer(client->adapter, msg, 1) <= 0) {
++			rc = -1;
++		}
++	}
++
++	if (debug_level > 3) {
++		printk ("[PENMOUNT] Read (%d) :", rc);
++		for (i=0; i<length; i++)
++			printk ("[0x%02X]", buffer[i]);
++		printk ("\n");
++	}	
++
++	penmount->CMD = 0x00;
++
++	return rc;
++}
++//------------------------------------------------------
++inline
++unsigned char penmount_get_buffer_checksum(unsigned char * buffer,
++						unsigned char length) {
++	int i = 0;
++	unsigned short Total = 0;
++	
++	for ( i=0; i<length; i++ ) {
++		Total += buffer[i];
++	}
++
++	return (~Total & 0xFF);
++}
++//------------------------------------------------------
++static
++int penmount_i2c_check_report(unsigned char * buffer,
++				unsigned char length) {
++	return (buffer[length] == penmount_get_buffer_checksum(buffer, length));
++}
++////////////////////////////////////////////////////////
++// PenMount Command Functions
++////////////////////////////////////////////////////////
++int penmount_i2c_send_command(struct penmount *penmount,
++				int length,
++				unsigned char *CMD,
++				unsigned char *ACK) {
++
++	unsigned char buffer[PENMOUNT_CMD_PACKET_SIZE] = {0x00};
++	int i = 0;
++	int ret = 0;
++
++	if (CMD != NULL) {
++		penmount->CMD = CMD[0];
++		// Add checksum
++		for (i=0 ; i<length; i++)
++			buffer[i] = CMD[i];
++
++		buffer[length] = penmount_get_buffer_checksum(CMD, length);
++	
++		if (penmount_i2c_write(penmount->i2c.driver, length+1, buffer) < 0) {
++			if (debug_level)
++				printk ("[PENMOUNT] Send CMD failed !\n");
++			return -1;
++		}
++		// TODO: For commands that requires a little bit delay
++		switch (CMD[0]) {
++		case 0xEA:
++			msleep(100);
++			break;
++		}
++	}
++	
++	if (ACK != NULL) {
++		if (penmount->i2c.use_read_thread) {
++			// TODO: Let read thread to handle
++			if (CMD != NULL) 
++				msleep(100);
++			if (penmount->ACK[0]) {
++				memcpy (ACK, penmount->ACK, length);
++				penmount->ACK[0] = 0;
++			} else {
++				ret = -1;
++			}
++		} else {
++			ret = penmount_i2c_read(penmount->i2c.driver, length+1, buffer);
++			if (ret < 0) {
++				if (debug_level)
++					printk ("[PENMOUNT] Get ACK failed !\n");
++				return -1;
++			} else if (ret == 0) {
++				if (!penmount_i2c_check_report(buffer, length)) {
++					if (debug_level)
++						printk ("[PENMOUNT] Invalid ACK !\n");
++					return -1;
++				}
++				memcpy (ACK, buffer, length);
++			}
++		}
++	}
++
++	return ret;	
++}
++//------------------------------------------------------
++int penmount_i2c_flush_buffer(struct penmount *penmount) {
++	int rc = 0;
++	int i = 0;
++	int j = 0;
++	unsigned char buffer[PENMOUNT_CMD_PACKET_SIZE];
++
++	/* 
++		When there is no data, PenMount P2 returns 0xEE.
++	*/
++	if (debug_level)
++		printk ("[PENMOUNT] Flush read buffer ! [START]\n");
++	for (i=0 ; i<30; i++) {
++		penmount->CMD = 0x00;
++		if (penmount_i2c_read(penmount->i2c.driver, sizeof(buffer), buffer) < 0) {
++			rc = -1;
++			break;
++		}
++
++		for (j=0; j<sizeof(buffer)-1; j++) {
++			if (buffer[j] != buffer[j+1])
++				break;
++		}
++
++		if (j == sizeof(buffer)-1) {
++			printk ("[PENMOUNT] Flush read buffer ! [END]\n");
++			break;
++		}
++	}
++	if (debug_level)
++		printk ("[PENMOUNT] Flush read buffer ! [END]\n");
++
++	return rc;	
++}
++//------------------------------------------------------
++static
++int penmount_i2c_get_read_length(struct penmount *penmount) {
++	unsigned char CMD[5] = {0xEF, 0x00, 0x00, 0x00, 0x01};
++	unsigned char ACK[5] = {0x00};
++
++	if (penmount_i2c_send_command(penmount, sizeof(CMD), CMD, ACK) < 0)
++		return -1;
++
++	if (ACK[2] & 0x10) {
++		printk ("[PENMOUNT] Device using burst read !\n");
++		penmount->i2c.read_length = PENMOUNT_CMD_PACKET_SIZE;
++		return 0;
++	}
++	
++	return -1;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_get_version(struct penmount *penmount) {
++	unsigned char CMD[5] = {0xEE};
++	unsigned char ACK[5] = {0x00};
++	unsigned short Product = 0;
++	unsigned char MajorVer = 0;
++	unsigned char MinorVer = 0;
++	unsigned char BuildVer = 0;
++	unsigned char ODMVer = 0;
++
++	if (penmount_i2c_send_command(penmount, sizeof(CMD), CMD, ACK) < 0)
++		return -1;
++
++	Product = (ACK[2] * 256 + ACK[1]) & 0x7FFF;
++	MajorVer = ACK[3];
++
++	CMD[0] = 0xED;
++	memset (ACK, 0, sizeof(ACK));
++	if (penmount_i2c_send_command(penmount, sizeof(CMD), CMD, ACK) >= 0) {
++		MinorVer = ACK[1];
++		ODMVer   = ACK[2];
++		BuildVer = ACK[3];
++	}
++
++
++	if (ODMVer)
++		printk ("[PENMOUNT] PM%04d.D%02d.%d.%d.%d\n", Product, ODMVer, MajorVer, MinorVer, BuildVer);
++	else
++		printk ("[PENMOUNT] PM%04d.%d.%d.%d\n", Product, MajorVer, MinorVer, BuildVer);
++
++	return 0;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_disable_report(struct penmount *penmount) {
++	unsigned char CMD[5] = {0xF0, 0x00, 0x00, 0x00, 0x01};
++	unsigned char ACK[5] = {0x00};
++
++	// TODO: Workaround for older P2-06 firmware versions. Need clear buffer before sending command.
++	penmount_i2c_flush_buffer(penmount);
++
++	if (penmount_i2c_send_command(penmount, sizeof(CMD), CMD, ACK) < 0)
++		return -1;
++
++	penmount_i2c_flush_buffer(penmount);
++
++	return 0;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_enable_report(struct penmount *penmount) {
++	unsigned char CMD[5] = {0xF1, 0x00, 0x00, 0x00, 0x01};
++	unsigned char ACK[5] = {0x00};
++
++	penmount_i2c_send_command(penmount, sizeof(CMD), CMD, ACK);
++
++	return 0;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_init_device(struct penmount *penmount) {
++
++	penmount->i2c.read_length = 1;
++	penmount->i2c.use_read_thread = 0;
++
++	penmount_i2c_disable_report(penmount);
++	penmount_i2c_get_read_length(penmount);
++	penmount_i2c_get_version(penmount);
++	penmount_i2c_enable_report(penmount);
++
++	penmount->i2c.use_read_thread = 1;
++
++	return 1;
++}
++////////////////////////////////////////////////////////
++// PenMount Read Data Functions
++////////////////////////////////////////////////////////
++static int penmount_i2c_read_report(struct penmount *penmount, 
++		unsigned char * buffer)
++{
++	unsigned char tmpbuf[PENMOUNT_CMD_PACKET_SIZE] = { 0 };
++
++	if (penmount_i2c_read(penmount->i2c.driver, penmount->report_size, tmpbuf) < 0)
++	{
++		if (debug_level)
++			printk(KERN_ERR "[PENMOUNT] Failed on reading P2 data\n");
++		return -1;
++	}
++
++	// Check Packet Data
++	if ( ! penmount_i2c_check_report ( tmpbuf, penmount->report_size-1 ) ) {
++		penmount->i2c.sync_mode = 1;
++		if (debug_level > 2)
++			printk(KERN_ERR "[PENMOUNT] Invalid report data, start syncing !\n");
++		return -1;
++	}
++
++	if ( ( ( tmpbuf[0] & PENMOUNT_P2_TOUCHFLAG_MASK ) != PENMOUNT_P2_TOUCHFLAG_TOUCH)
++	&& ( ( tmpbuf[0] & PENMOUNT_P2_TOUCHFLAG_MASK ) != PENMOUNT_P2_TOUCHFLAG_RELEASE) ) {
++		if (debug_level)
++			printk(KERN_ERR "[PENMOUNT] Receive ACK of command !\n");
++		memcpy(penmount->ACK, tmpbuf, sizeof(penmount->ACK));
++		return 1;
++	}
++
++	memcpy(buffer, tmpbuf, penmount->report_size);
++
++	return 0;
++}
++//------------------------------------------------------
++static void penmount_i2c_parse_report(struct penmount *penmount,
++				unsigned char * buffer)
++{
++	unsigned char slotnum = 0;
++
++	if (debug_level) {
++		unsigned char i=0;
++		printk ("[PENMOUNT] Touch report : ");
++		for (i=0; i<penmount->report_size; i++)
++			printk ("[0x%02X]", buffer[i]);
++		printk ("\n");
++	}
++
++	// [TOUCH][X][X][Y][Y]
++	slotnum = buffer[0] & PENMOUNT_P2_CONTACTID_MASK;
++	if (slotnum < PENMOUNT_P2_MAX_CONTACT) {
++		penmount->slots[slotnum].active = (buffer[0]&PENMOUNT_P2_TOUCHFLAG_MASK)==PENMOUNT_P2_TOUCHFLAG_TOUCH;
++		penmount->slots[slotnum].x = ((buffer[1] & 0xFF) | ((buffer[2] & 0xFF) << 8));
++		penmount->slots[slotnum].y = ((buffer[3] & 0xFF) | ((buffer[4] & 0xFF) << 8));
++	}
++
++#if (PENMOUNT_MTPROTO == PENMOUNT_MTPROTO_B)
++	if (slotnum < PENMOUNT_P2_MAX_CONTACT)
++		penmount_mtevent(penmount, penmount->touchdev);
++#else
++	if (!slotnum)
++		penmount_input(penmount, penmount->touchdev);
++#endif
++	return;
++}
++////////////////////////////////////////////////////////
++// I2C Driver Functions
++////////////////////////////////////////////////////////
++static int penmount_i2c_probe(struct i2c_client *, const struct i2c_device_id *);
++static int penmount_i2c_remove(struct i2c_client *);
++#ifdef CONFIG_X86
++static int penmount_i2c_detect(struct i2c_client *, struct i2c_board_info *);
++#endif
++////////////////////////////////////////////////////////
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 26)
++static const
++struct i2c_device_id PENMOUNT_I2C_DEVICES[] = 
++{
++		{ PENMOUNT_I2C_DRIVERNAME, PENMOUNT_MODEL_P2 },
++		{ }
++};
++#endif
++//------------------------------------------------------
++static const
++unsigned short PENMOUNT_I2C_ADDRESS[] = {
++		PENMOUNT_I2C_SLAVEADDR,
++		I2C_CLIENT_END
++};
++//------------------------------------------------------
++#ifdef CONFIG_OF
++static struct of_device_id penmount_i2c_dt_ids[] = {
++	{ .compatible = "penmount,penmunt_i2c" },
++	{ /* sentinel */ }
++};
++#endif
++//------------------------------------------------------
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 24)
++static
++struct i2c_driver PENMOUNT_I2C_DRIVER = {
++		.probe        = penmount_i2c_probe,
++		.remove       = penmount_i2c_remove,
++#ifdef CONFIG_X86
++		.class        = I2C_CLASS_HWMON,
++		.detect       = penmount_i2c_detect,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 33)
++		.address_list = PENMOUNT_I2C_ADDRESS,
++#endif
++#endif
++		.id_table     = PENMOUNT_I2C_DEVICES,
++		.driver       = {
++				.name = PENMOUNT_I2C_DRIVERNAME,
++#ifdef CONFIG_OF
++				.of_match_table	= of_match_ptr(penmount_i2c_dt_ids),
++#endif
++		},
++};
++#endif
++////////////////////////////////////////////////////////
++struct penmount * penmount_init_context(void) {
++	struct penmount *penmount = NULL;
++	unsigned char i = 0;
++
++	penmount = kzalloc(sizeof(struct penmount), GFP_KERNEL);
++	if (penmount == NULL)
++		return NULL;
++
++	for (i = 0; i < PENMOUNT_P2_MAX_CONTACT; i++) {
++
++	}
++
++	mutex_init(&penmount->i2c.mutex);
++
++	INIT_WORK(&penmount->i2c.work, penmount_i2c_do_read_work);
++
++	return penmount;
++}
++//------------------------------------------------------
++int penmount_init_touch(struct penmount *penmount,
++			struct input_id *inputid) {
++
++	penmount->touchdev = input_allocate_device();
++	if (penmount->touchdev == NULL) {
++		printk ("[PENMOUNT] Failed to allocated input device !\n");
++		return -ENOMEM;
++	}
++
++	penmount->touchdev->name = "PenMount I2C Touch Screen";
++	penmount->touchdev->phys = penmount->phys;
++	memcpy (&penmount->touchdev->id, inputid, sizeof(struct input_id));
++	penmount->touchdev->dev.parent = &penmount->i2c.driver->dev;
++
++	penmount->touchdev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
++	penmount->touchdev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
++	input_set_abs_params(penmount->touchdev, ABS_X, 0, PENMOUNT_P2_RESOLUTION, 0, 0);
++	input_set_abs_params(penmount->touchdev, ABS_Y, 0, PENMOUNT_P2_RESOLUTION, 0, 0);
++
++#if (PENMOUNT_MTPROTO != PENMOUNT_MTPROTO_NONE)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
++	set_bit(INPUT_PROP_DIRECT, penmount->touchdev->propbit);
++#endif
++#if (PENMOUNT_MTPROTO == PENMOUNT_MTPROTO_B)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
++	input_mt_init_slots (penmount->touchdev, PENMOUNT_P2_MAX_CONTACT, INPUT_MT_DIRECT);
++#else
++	input_mt_init_slots (penmount->touchdev, PENMOUNT_P2_MAX_CONTACT);
++#endif
++#endif	
++	input_set_abs_params(penmount->touchdev,
++			     ABS_MT_POSITION_X, 0, PENMOUNT_P2_RESOLUTION, 0, 0);
++	input_set_abs_params(penmount->touchdev,
++			     ABS_MT_POSITION_Y, 0, PENMOUNT_P2_RESOLUTION, 0, 0);
++#endif
++
++	input_set_drvdata(penmount->touchdev, penmount);
++	return input_register_device(penmount->touchdev);
++}
++//------------------------------------------------------
++int penmount_init_input(struct penmount *penmount) {
++	struct input_id inputid ;
++
++	inputid.bustype = BUS_I2C;
++	inputid.vendor  = PENMOUNT_VENDOR_ID ;
++	inputid.product = PENMOUNT_MODEL_P2 ;
++	inputid.version = PMDRIVER_VERSION ;
++
++	penmount_init_touch (penmount, &inputid);
++	if (penmount->touchdev != NULL) {
++		dev_set_drvdata(&penmount->touchdev->dev, penmount);
++	}
++
++	return 0;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_init_gpio(struct i2c_client *client) {
++	int ret = 0;
++	/* TODO : Adding BSP specific code here. */
++	struct penmount *penmount = NULL;
++
++	penmount = i2c_get_clientdata(client);
++	/* Initialize gpio and interrupt pins */
++	ret = gpio_request(penmount->i2c.gpio_irq, PENMOUNT_I2C_GPIO_NAME);
++	if (ret < 0)
++	{
++		return -1;
++	}
++
++	gpio_direction_input(penmount->i2c.gpio_irq);
++
++	/* TODO: Set pull up (Active Low) */
++	/* Please check "include/linux/interrupt.h" for more information. */
++
++	return 0;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_init_irq(struct i2c_client *client) {
++	struct penmount *penmount = NULL;
++	int ret = 0;
++
++	penmount = i2c_get_clientdata(client);
++
++	if (client->irq) {
++		printk(KERN_ERR "[PENMOUNT] irq already specified !!\n");
++		return 0;
++	}	
++
++#ifdef PENMOUNT_I2C_GPIO_IRQ
++	penmount->i2c.gpio_irq = PENMOUNT_I2C_GPIO_IRQ;
++#endif
++
++	if (penmount_i2c_init_gpio(client) < 0) {
++		printk(KERN_ERR "[PENMOUNT] Failed to initialize gpio !!\n");
++		return -1;
++	}
++
++	ret = gpio_to_irq(penmount->i2c.gpio_irq);
++	if (ret < 0) {
++		printk(KERN_ERR "[PENMOUNT] Failed to get irq for (%X) !!\n", penmount->i2c.gpio_irq);
++		return -1;
++	}
++	penmount->i2c.irq = client->irq = ret;
++
++	return ret;
++}
++//------------------------------------------------------
++#ifdef CONFIG_ANDROID
++static void penmount_i2c_early_suspend(struct early_suspend *handler)
++{
++	struct penmount *penmount = NULL;
++	penmount = container_of(handler, struct penmount, early_suspend);
++
++	printk ("[PENMOUNT] System Early Suspend !!\n");
++
++	disable_irq(penmount->i2c.driver->irq);
++	penmount->i2c.use_read_thread = 0;
++
++	if(penmount != NULL) {
++		struct i2c_client *client = penmount->i2c.driver;
++		if (client != NULL) {
++			unsigned char CMD[] = {0xE2, 0x00, 0x00, 0x00, 0x00, 0x1D};
++			if (i2c_master_send(client, CMD, sizeof(CMD)) != sizeof(CMD)) {
++				printk(KERN_ERR "[wcs][%s] penmount_i2c suspend failed\n", __func__);
++			}
++		}
++	}
++	return;
++}
++//------------------------------------------------------
++static void penmount_i2c_late_resume(struct early_suspend *handler)
++{
++	struct penmount *penmount = NULL;
++	penmount = container_of(handler, struct penmount, early_suspend);
++
++	printk ("[PENMOUNT] System late resume !!\n");
++
++#if PENMOUNT_USE_IRQ
++	if (penmount->i2c.driver->irq)
++	{
++		struct i2c_client *client = penmount->i2c.driver;
++		if (client != NULL) {
++			// Reset base signal
++			unsigned char CMD[] = {0xF1, 0x00, 0x00, 0x00, 0x00, 0x0E};
++			if (i2c_master_send(client, CMD, sizeof(CMD)) != sizeof(CMD)) {
++				printk(KERN_ERR "[wcs][%s] penmount_i2c esume failed\n", __func__);
++			}
++		}
++	}
++	else
++#endif
++	{
++		hrtimer_start(&penmount->i2c.timer, ktime_set(0, PENMOUNT_I2C_POLL_INTERVAL), HRTIMER_MODE_REL);
++	}
++
++ 	enable_irq(penmount->i2c.driver->irq);
++	penmount->i2c.use_read_thread = 1;
++	return;
++}
++#endif
++//------------------------------------------------------
++static
++int penmount_i2c_probe(struct i2c_client *client,
++		const struct i2c_device_id *id) {
++	int ret = 0;
++	struct penmount *penmount = NULL;
++
++	printk(KERN_INFO "[PENMOUNT] Probing for device ...\n");
++
++	penmount = penmount_init_context ();
++	if (penmount == NULL) {
++		printk ("[PENMOUNT] Failed to allocated device context !\n");
++		return -ENOMEM;
++	}
++
++	i2c_set_clientdata(client, penmount);
++	penmount->i2c.driver = client;
++
++	penmount->report_size = PENMOUNT_CMD_PACKET_SIZE;
++	penmount->maxcontacts = PENMOUNT_P2_MAX_CONTACT;
++	penmount_i2c_init_device(penmount);
++#if PENMOUNT_USE_IRQ
++	if ( penmount_i2c_init_irq(client) >= 0 ) {
++		penmount->i2c.desc = irq_to_desc(client->irq);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 30)
++		ret = devm_request_threaded_irq(&client->dev, client->irq, NULL, penmount_i2c_interrupt, IRQF_ONESHOT | IRQF_TRIGGER_LOW, client->name, client);
++#endif
++		printk ("[PENMOUNT] Using IRQ %d\n", client->irq);
++	} else
++#endif
++	{
++		// Use polling
++		// TODO: Need to read data one by one.
++		penmount->i2c.read_length = 1;
++		// timer setup
++		hrtimer_init(&penmount->i2c.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++		penmount->i2c.timer.function = penmount_i2c_polldata;
++
++		hrtimer_start(&penmount->i2c.timer, ktime_set(1, 0), HRTIMER_MODE_REL);
++	}
++
++	snprintf(penmount->phys, sizeof(penmount->phys), "%s/input0", client->name);
++	ret = penmount_init_input(penmount);
++	if (ret < 0) {
++		kfree(penmount);
++		return ret;
++	}
++
++#ifdef CONFIG_ANDROID
++	penmount->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN;
++	penmount->early_suspend.suspend = penmount_i2c_early_suspend;
++	penmount->early_suspend.resume = penmount_i2c_late_resume;
++	register_early_suspend(&penmount->early_suspend);
++#endif
++
++	return 0;
++}
++//------------------------------------------------------
++static
++int penmount_i2c_remove(struct i2c_client *client) {
++
++	struct penmount *penmount = NULL;
++
++	penmount = i2c_get_clientdata(client);
++
++#ifdef CONFIG_ANDROID
++	unregister_early_suspend(&penmount->early_suspend);
++#endif
++
++	if (penmount->i2c.irq)
++		free_irq(penmount->i2c.irq, penmount);
++	else if (!client->irq)
++		hrtimer_cancel(&penmount->i2c.timer);
++
++	if (penmount->touchdev != NULL)
++		input_unregister_device(penmount->touchdev);
++
++	kfree(penmount);
++
++	return 0;
++}
++//------------------------------------------------------
++#ifdef CONFIG_X86
++/* Return 0 if detection is successful, -ENODEV otherwise */
++static
++int penmount_i2c_detect(struct i2c_client *client,
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 33)
++		int kind,
++#endif
++		struct i2c_board_info *info)
++{
++	strlcpy(info->type, PENMOUNT_I2C_DRIVERNAME, I2C_NAME_SIZE);
++	return 0;
++}
++#endif
++////////////////////////////////////////////////////////
++// Module Functions
++////////////////////////////////////////////////////////
++static
++int __init penmount_init(void)
++{
++	printk ("[PENMOUNT] Loading %s V%d.%d.%d\n", PENMOUNT_I2C_DRIVERNAME, PMDRIVER_MAJORVER, PMDRIVER_MINORVER, PMDRIVER_BUILDVER);
++
++	return i2c_add_driver(&PENMOUNT_I2C_DRIVER);
++}
++//------------------------------------------------------
++static
++void __exit penmount_exit(void)
++{
++	i2c_del_driver(&PENMOUNT_I2C_DRIVER);
++
++	return;
++}
++////////////////////////////////////////////////////////
++module_init (penmount_init);
++module_exit (penmount_exit);
++////////////////////////////////////////////////////////
++MODULE_AUTHOR("PenMount Touch Solutions <penmount@seed.net.tw>");
++MODULE_DESCRIPTION("PenMount I2C TouchScreen Driver");
++MODULE_LICENSE("GPL");
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 26)
++MODULE_DEVICE_TABLE(i2c, PENMOUNT_I2C_DEVICES);
++#endif
++////////////////////////////////////////////////////////
++
+-- 
+1.9.1
+
