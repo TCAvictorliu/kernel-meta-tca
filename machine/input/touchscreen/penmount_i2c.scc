@@ -1,4 +1,5 @@
 define KFEATURE_DESCRIPTION "penmount i2c touchscreen" 
 define KFEATURE_COMPATIBILITY board   
 
-kconf hardware penmount_i2c/penmount_i2c.cfg
+kconf hardware penmount_i2c.cfg
+patch penmount_i2c/0001-Add-the-penmount-i2c-driver-for-the-touch-controler.patch
