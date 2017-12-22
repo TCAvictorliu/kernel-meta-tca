@@ -3,3 +3,4 @@ define KFEATURE_COMPATIBILITY board
 
 kconf hardware toshiba_tc358870/toshiba_tc358870.cfg
 patch toshiba_tc358870/0001-Toshiba-tc358870xbg-driver.patch
+patch toshiba_tc358870/0002-Toshiba-tc358870xbg-mode-setting-support.patch
