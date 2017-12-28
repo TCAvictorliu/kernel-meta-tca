@@ -1,0 +1,27 @@
+From 7d6d8580365c1edac71b0ab819622ca2454f731f Mon Sep 17 00:00:00 2001
+From: Victor Liu <zheng.liu@thales-cetca.com>
+Date: Thu, 28 Dec 2017 21:49:56 +0800
+Subject: [PATCH] Toshiba tc358870xbg mode setting fix
+
+---
+ drivers/media/i2c/tc358870.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/i2c/tc358870.c b/drivers/media/i2c/tc358870.c
+index 2b1c45ca0508..41c1230f2579 100644
+--- a/drivers/media/i2c/tc358870.c
++++ b/drivers/media/i2c/tc358870.c
+@@ -356,8 +356,9 @@ static DEVICE_ATTR(sys_status, S_IRUGO, smiapp_sysfs_status_read, NULL);
+ void tc358870_hdmi_setup(void)
+ {
+ 	struct tc358870_state *state = g_tc_state;
++	if(state == NULL) return;
++	
+ 	struct i2c_client *client = state->i2c_client;
+-
+ #if 1
+ 	if (state->reset_gpio){
+ 		tc358870_gpio_reset(state);
+-- 
+2.14.1
+
