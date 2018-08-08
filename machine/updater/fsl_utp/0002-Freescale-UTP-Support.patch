@@ -1,14 +1,14 @@
-From e7677606f5f6411f2ae89c9c900c1f1b77dfeb5b Mon Sep 17 00:00:00 2001
+From 3a1432e3610ee767c0f3e08b537f7ab97137aa5c Mon Sep 17 00:00:00 2001
 From: Victor Liu <zheng.liu@thales-cetca.com>
-Date: Tue, 7 Aug 2018 17:27:19 +0800
-Subject: [PATCH] Add Freescale UTP support
+Date: Wed, 8 Aug 2018 10:54:12 +0800
+Subject: [PATCH 2/2] Freescale-UTP-Support
 
 ---
  drivers/usb/gadget/Kconfig                   |   6 +
  drivers/usb/gadget/function/f_mass_storage.c |  70 +-
- drivers/usb/gadget/function/fsl_updater.c    | 647 +++++++++++++++++++
+ drivers/usb/gadget/function/fsl_updater.c    | 644 +++++++++++++++++++
  drivers/usb/gadget/function/fsl_updater.h    | 152 +++++
- 4 files changed, 874 insertions(+), 1 deletion(-)
+ 4 files changed, 871 insertions(+), 1 deletion(-)
  create mode 100644 drivers/usb/gadget/function/fsl_updater.c
  create mode 100644 drivers/usb/gadget/function/fsl_updater.h
 
@@ -170,10 +170,10 @@ index acecd13dcbd9..105869404505 100644
  static inline struct fsg_lun_opts *to_fsg_lun_opts(struct config_item *item)
 diff --git a/drivers/usb/gadget/function/fsl_updater.c b/drivers/usb/gadget/function/fsl_updater.c
 new file mode 100644
-index 000000000000..59ec7479bd71
+index 000000000000..eec5bf1f8f1e
 --- /dev/null
 +++ b/drivers/usb/gadget/function/fsl_updater.c
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,644 @@
 +/*
 + * Freescale UUT driver
 + *
@@ -460,8 +460,7 @@ index 000000000000..59ec7479bd71
 +		bh->inreq->zero = 0;
 +
 +		/* USB Physical transfer: Data from device to host */
-+		start_transfer(fsg, fsg->bulk_in, bh->inreq,
-+				&bh->inreq_busy, &bh->state);
++		start_transfer(fsg, fsg->bulk_in, bh->inreq);
 +
 +		fsg->common->next_buffhd_to_fill = bh->next;
 +
@@ -521,8 +520,7 @@ index 000000000000..59ec7479bd71
 +			 * the bulk-out maxpacket size */
 +			set_bulk_out_req_length(fsg->common, bh, amount);
 +			bh->outreq->short_not_ok = 1;
-+			start_transfer(fsg, fsg->bulk_out, bh->outreq,
-+					&bh->outreq_busy, &bh->state);
++			start_transfer(fsg, fsg->bulk_out, bh->outreq);
 +			fsg->common->next_buffhd_to_fill = bh->next;
 +			continue;
 +		}
@@ -713,8 +711,7 @@ index 000000000000..59ec7479bd71
 +
 +	bh->inreq->length = US_BULK_CS_WRAP_LEN;
 +	bh->inreq->zero = 0;
-+	start_transfer(fsg, fsg->bulk_in, bh->inreq,
-+			&bh->inreq_busy, &bh->state);
++	start_transfer(fsg, fsg->bulk_in, bh->inreq);
 +	fsg->common->next_buffhd_to_fill = bh->next;
 +	return 0;
 +}
