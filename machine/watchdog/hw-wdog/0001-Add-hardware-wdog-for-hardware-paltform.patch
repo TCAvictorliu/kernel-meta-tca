@@ -1,0 +1,108 @@
+From ddc44d9a64ee94d38e90154428a5ccb91a30ec7c Mon Sep 17 00:00:00 2001
+From: "andy.huang" <andy.huang@thales-cetca.com>
+Date: Mon, 17 Sep 2018 16:20:52 +0800
+Subject: [PATCH] Add-hardware-wdog-for-hardware-paltform
+
+---
+ drivers/watchdog/hw_wdg.c | 89 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+ create mode 100644 drivers/watchdog/hw_wdg.c
+
+diff --git a/drivers/watchdog/hw_wdg.c b/drivers/watchdog/hw_wdg.c
+new file mode 100644
+index 0000000..c36a203
+--- /dev/null
++++ b/drivers/watchdog/hw_wdg.c
+@@ -0,0 +1,89 @@
++#include <linux/sched.h>   
++#include <linux/kthread.h> 
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/of_gpio.h>
++
++MODULE_AUTHOR("Andy Huang");
++MODULE_LICENSE("Dual BSD/GPL");
++
++int gpio = 126; /*The default of the GPIO is GPIO_4_30,so 3*32+30=126*/
++int hw_state = 1; /*Set as 0 to stop feed the wdog.*/
++module_param(gpio, int, S_IRUGO);
++module_param(hw_state, int, S_IWUSR | S_IWGRP);
++
++static struct task_struct *hw_wdg_task;
++
++int hw_wdg(void *data){
++	bool state = false;
++	int ret = gpio_request(gpio, "wdg-gpio"); 
++	if (ret){ 
++		pr_err("%s: Could not get GPIO %d", __func__, gpio); 
++		return ret; 
++	} 
++
++	if (!gpio_is_valid(gpio)){
++		printk(KERN_ERR "hw wdg gpio is in invalid\n");
++		return -ENODEV;
++	}
++	gpio_direction_output(gpio, 0);
++	printk(KERN_INFO "hw wdg, gpio:%d\n", gpio);
++
++	while(1){
++		set_current_state(TASK_UNINTERRUPTIBLE);
++		if(kthread_should_stop()) {
++			break;
++		}
++
++		if ( hw_state ){
++			if (state){
++				/*start feed the wdg*/
++				gpio_direction_output(gpio, state);
++				gpio_set_value(gpio, state);
++				state = false;
++			}
++			else
++			{
++				/*stop feed the wdg*/
++				gpio_direction_output(gpio, state);
++				gpio_set_value(gpio, state);
++				state = true;
++			}
++		}
++		else
++		{
++			/*not feed the wdg*/
++			gpio_set_value(gpio,0);
++		}		
++		
++		schedule_timeout(HZ/10); /*feed the hw dog every 100 ms.*/
++	}
++	return 0;
++}
++
++static int hw_wdg_init(void)
++{
++	int err = 0;
++	printk(KERN_INFO "hardware wdg probe.\n");
++	
++	hw_wdg_task = kthread_create(hw_wdg, NULL, "hw_wdg_task");
++	if(IS_ERR(hw_wdg_task)){
++		printk(KERN_ERR "Unable to start kernel thread.\n");
++		err = PTR_ERR(hw_wdg_task);
++		hw_wdg_task = NULL;
++		return err;
++	}
++	wake_up_process(hw_wdg_task);
++	return 0;
++}
++module_init(hw_wdg_init);
++
++static void hw_wdg_exit(void)
++{
++	if (hw_wdg_task){
++		kthread_stop(hw_wdg_task);
++		hw_wdg_task = NULL;
++	}
++	printk(KERN_INFO "hardware wdg exit.\n");
++}
++module_exit(hw_wdg_exit);
+-- 
+1.9.1
+
