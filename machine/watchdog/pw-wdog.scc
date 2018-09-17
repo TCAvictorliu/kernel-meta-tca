@@ -1,0 +1,5 @@
+define KFEATURE_DESCRIPTION "hardware watchdog" 
+define KFEATURE_COMPATIBILITY board
+
+kconf hardware pwm-wdog/hw-wdog.cfg 
+patch hw-wdog/0001-Add-hardware-wdog-for-hardware-paltform.patch 
