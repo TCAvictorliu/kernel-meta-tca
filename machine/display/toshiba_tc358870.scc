@@ -6,3 +6,4 @@ patch toshiba_tc358870/0001-Toshiba-tc358870xbg-driver.patch
 patch toshiba_tc358870/0002-Toshiba-tc358870xbg-mode-setting-support.patch
 patch toshiba_tc358870/0003-Toshiba-tc358870xbg-mode-setting-fix.patch
 patch toshiba_tc358870/0004-Adaptation-i.MX6Q-dwhdmi-display-bridge.patch
+patch toshiba_tc358870/0005-fix-imx-to-tc358870-impedance-matching.patch
