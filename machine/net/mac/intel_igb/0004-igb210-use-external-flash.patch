@@ -1,0 +1,25 @@
+From 5ab64f1e63f9946c39d787e4cbb32ec4513d4339 Mon Sep 17 00:00:00 2001
+From: "Victro.Liu" <zheng.liu@thales-cetca.com>
+Date: Wed, 21 Nov 2018 07:28:18 +0000
+Subject: [PATCH] igb210 use external flash
+
+---
+ drivers/net/ethernet/intel/igb/e1000_i210.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_i210.c b/drivers/net/ethernet/intel/igb/e1000_i210.c
+index 90aaed9966d8..ec09b89719e5 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_i210.c
++++ b/drivers/net/ethernet/intel/igb/e1000_i210.c
+@@ -668,7 +668,7 @@ static s32 igb_pool_flash_update_done_i210(struct e1000_hw *hw)
+  **/
+ bool igb_get_flash_presence_i210(struct e1000_hw *hw)
+ {
+-	return false;
++	return true;
+ }
+ 
+ /**
+-- 
+2.17.1
+

@@ -2,4 +2,4 @@ define KFEATURE_DESCRIPTION "Inter IGB 1000M PCIE MAC"
 define KFEATURE_COMPATIBILITY board
 
 kconf hardware intel_igb/intel_igb.cfg
-patch intel_igb/0003-Enable-igb210-unprog.patch
+patch intel_igb/0004-igb210-use-external-flash.patch
