@@ -1,0 +1,81 @@
+From 72f3d212fbe5a72c1cee3a20bfd14b996ba95b37 Mon Sep 17 00:00:00 2001
+From: TCAVictorliu <zheng.liu@thales-cetca.com>
+Date: Fri, 22 Mar 2019 09:30:24 +0000
+Subject: [PATCH] fix imx monitor and reinit tc358870
+
+---
+ drivers/media/i2c/tc358870.c | 30 ++++++++++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/i2c/tc358870.c b/drivers/media/i2c/tc358870.c
+index 41c1230f2579..0bd711d85154 100644
+--- a/drivers/media/i2c/tc358870.c
++++ b/drivers/media/i2c/tc358870.c
+@@ -242,7 +242,7 @@ i2c_wr16(client,0x0002,0x0001); // ConfCtl1 -> sleep
+ mdelay(5);
+ i2c_wr32(client,0x02AC,0x000090bf); //820Mbps MIPI_PLL_CNF
+ i2c_wr32(client,0x02A0,0x00000003); // MIPI_PLL_CONTROL
+-mdelay(10);
++mdelay(50);
+ i2c_wr16(client,0x0002,0x0000); // ConfCtl1 -> unsleep
+ i2c_wr32(client,0x0118,0x00000014); // LANE_ENABLE
+ i2c_wr32(client,0x0120,0x00001770); // LINE_INIT_COUNT
+@@ -334,7 +334,8 @@ i2c_wr16(client,0x0504,0x0000);
+ static void tc358870_gpio_reset(struct tc358870_state *state)
+ {
+ 	gpiod_set_value(state->reset_gpio, 1);
+-	usleep_range(1000, 2000);
++	//usleep_range(1000, 2000);
++	msleep(5);
+ 	gpiod_set_value(state->reset_gpio, 0);
+ 	msleep(5);
+ }
+@@ -353,6 +354,28 @@ smiapp_sysfs_status_read(struct device *dev, struct device_attribute *attr,
+ 
+ static DEVICE_ATTR(sys_status, S_IRUGO, smiapp_sysfs_status_read, NULL);
+ 
++static ssize_t
++smiapp_lane_status_hs_read(struct device *dev, struct device_attribute *attr,
++                        char *buf)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	u32 val;
++	val = i2c_rd32(client, 0x0290);
++	return snprintf(buf, 32, "%08x\n", val) + 1;
++}
++static DEVICE_ATTR(lane_status_hs, S_IRUGO, smiapp_lane_status_hs_read, NULL);
++
++static ssize_t
++smiapp_lane_status_lp_read(struct device *dev, struct device_attribute *attr,
++                        char *buf)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	u32 val;
++	val = i2c_rd32(client, 0x0294);
++	return snprintf(buf, 32, "%08x\n", val) + 1;
++}
++static DEVICE_ATTR(lane_status_lp, S_IRUGO, smiapp_lane_status_lp_read, NULL);
++
+ void tc358870_hdmi_setup(void)
+ {
+ 	struct tc358870_state *state = g_tc_state;
+@@ -365,6 +388,7 @@ void tc358870_hdmi_setup(void)
+ 	}
+ 
+ 	tc358870_initial_setup(state);
++	mdelay(10);
+ #else
+ 	// Before Video TX
+ 	i2c_wr16(client,0x0500,0x0004); // CMD_SEL
+@@ -459,6 +483,8 @@ static int tc358870_probe(struct i2c_client *client,
+ 	g_tc_state = state;
+ 	
+ 	device_create_file(&client->dev, &dev_attr_sys_status);
++	device_create_file(&client->dev, &dev_attr_lane_status_hs);
++	device_create_file(&client->dev, &dev_attr_lane_status_lp);
+ 
+ 	dev_info(&client->dev, "%s found @ 0x%x (%s)\n", client->name,
+ 		  client->addr << 1, client->adapter->name);
+-- 
+2.17.1
+
