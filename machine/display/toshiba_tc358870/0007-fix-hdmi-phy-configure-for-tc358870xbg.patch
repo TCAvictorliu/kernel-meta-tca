@@ -1,0 +1,453 @@
+From 5e92763069dd86fed2c0a52b20017777a1194de8 Mon Sep 17 00:00:00 2001
+From: TCAVictorliu <zheng.liu@thales-cetca.com>
+Date: Tue, 23 Apr 2019 08:04:31 +0000
+Subject: [PATCH] fix hdmi phy configure for tc358870xbg
+
+---
+ drivers/gpu/drm/bridge/synopsys/dw-hdmi.c |   6 +
+ drivers/gpu/drm/imx/dw_hdmi-imx.c         |  82 +--------
+ drivers/media/i2c/tc358870.c              | 198 +++++++++-------------
+ include/media/i2c/tc358870.h              |   1 +
+ 4 files changed, 91 insertions(+), 196 deletions(-)
+
+diff --git a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
+index 5971976284bf..8514e9e8d5eb 100644
+--- a/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
++++ b/drivers/gpu/drm/bridge/synopsys/dw-hdmi.c
+@@ -38,6 +38,7 @@
+ #include "dw-hdmi-cec.h"
+ 
+ #include <media/cec-notifier.h>
++#include <media/i2c/tc358870.h>
+ 
+ #define DDC_SEGMENT_ADDR	0x30
+ 
+@@ -1255,6 +1256,11 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
+ 			return ret;
+ 	}
+ 
++        hdmi_writeb(hdmi, 0xFF, HDMI_PHY_MASK0);	
++	tc358870_hdmi_setup();
++	dw_hdmi_phy_update_hpd(hdmi, NULL, false, false, true);
++	tc358870_boe_setup();
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/imx/dw_hdmi-imx.c b/drivers/gpu/drm/imx/dw_hdmi-imx.c
+index 4cd389dce230..b3a75dd0cb8a 100644
+--- a/drivers/gpu/drm/imx/dw_hdmi-imx.c
++++ b/drivers/gpu/drm/imx/dw_hdmi-imx.c
+@@ -19,7 +19,6 @@
+ #include <drm/drm_crtc_helper.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_encoder_slave.h>
+-#include <media/i2c/tc358870.h>
+ 
+ #include "imx-drm.h"
+ 
+@@ -54,12 +53,6 @@ static const struct dw_hdmi_mpll_config imx_mpll_cfg[] = {
+ 			{ 0x20a1, 0x000a },
+ 			{ 0x40a2, 0x000a },
+ 		},
+-	}, {
+-		216000000, {
+-			{ 0x00a0, 0x000a },
+-			{ 0x2001, 0x000f },
+-			{ 0x4002, 0x000f },
+-		},
+ 	}, {
+ 		~0UL, {
+ 			{ 0x0000, 0x0000 },
+@@ -82,7 +75,7 @@ static const struct dw_hdmi_curr_ctrl imx_cur_ctr[] = {
+ 	}, {
+ 		118800000, { 0x091c, 0x091c, 0x06dc },
+ 	}, {
+-		216000000, { 0x06dc, 0x0b5c, 0x091c },
++		148500000, { 0x06dc, 0x0b5c, 0x091c },
+ 	}, {
+ 		~0UL, { 0x0000, 0x0000, 0x0000 },
+ 	},
+@@ -175,83 +168,11 @@ imx6dl_hdmi_mode_valid(struct drm_connector *con,
+ 	return MODE_OK;
+ }
+ 
+-#define IMX_HDMI_TX_PHY_PWRCTRL                  0x00
+-#define IMX_HDMI_TX_PHY_SERDIVCTRL               0x01
+-#define IMX_HDMI_TX_PHY_SERCKCTRL                0x02
+-#define IMX_HDMI_TX_PHY_SERCKKILLCTRL            0x03
+-#define IMX_HDMI_TX_PHY_TXRESCTRL                0x04
+-#define IMX_HDMI_TX_PHY_CKCALCTRL                0x05
+-#define IMX_HDMI_TX_PHY_CPCE_CTRL                0x06
+-#define IMX_HDMI_TX_PHY_TXCLKMEASCTRL            0x07
+-#define IMX_HDMI_TX_PHY_TXMEASCTRL               0x08
+-#define IMX_HDMI_TX_PHY_CKSYMTXCTRL              0x09
+-#define IMX_HDMI_TX_PHY_CMPSEQCTRL               0x0a
+-#define IMX_HDMI_TX_PHY_CMPPWRCTRL               0x0b
+-#define IMX_HDMI_TX_PHY_CMPMODECTRL              0x0c
+-#define IMX_HDMI_TX_PHY_MEASCTRL                 0x0d
+-#define IMX_HDMI_TX_PHY_VLEVCTRL                 0x0e
+-#define IMX_HDMI_TX_PHY_D2ACTRL                  0x0f
+-#define IMX_HDMI_TX_PHY_CURRCTRL                 0x10
+-#define IMX_HDMI_TX_PHY_DRVANACTRL               0x11
+-#define IMX_HDMI_TX_PHY_PLLMEASCTRL              0x12
+-#define IMX_HDMI_TX_PHY_PLLPHBYCTRL              0x13
+-#define IMX_HDMI_TX_PHY_GRP_CTRL                 0x14
+-#define IMX_HDMI_TX_PHY_GMPCTRL                  0x15
+-#define IMX_HDMI_TX_PHY_MPLLMEASCTRL             0x16
+-#define IMX_HDMI_TX_PHY_MSM_CTRL                 0x17
+-#define IMX_HDMI_TX_PHY_SCRPB_STATUS             0x18
+-#define IMX_HDMI_TX_PHY_TXTERM                   0x19
+-#define IMX_HDMI_TX_PHY_PTRPT_ENBL               0x1a
+-#define IMX_HDMI_TX_PHY_PATTERNGEN               0x1b
+-#define IMX_HDMI_TX_PHY_SDCAP_MODE               0x1c
+-#define IMX_HDMI_TX_PHY_SCOPEMODE                0x1d
+-#define IMX_HDMI_TX_PHY_DIGTXMODE                0x1e
+-#define IMX_HDMI_TX_PHY_STR_STATUS               0x1f
+-#define IMX_HDMI_TX_PHY_SCOPECNT0                0x20
+-#define IMX_HDMI_TX_PHY_SCOPECNT1                0x21
+-#define IMX_HDMI_TX_PHY_SCOPECNT2                0x22
+-#define IMX_HDMI_TX_PHY_SCOPECNTCLK              0x23
+-#define IMX_HDMI_TX_PHY_SCOPESAMPLE              0x24
+-#define IMX_HDMI_TX_PHY_SCOPECNTMSB01            0x25
+-#define IMX_HDMI_TX_PHY_SCOPECNTMSB2CK           0x26
+-
+-#define HDMI_3D_TX_PHY_CKCALCTRL_OVERRIDE               BIT(15)
+-
+-static int imx_hdmi_phy_configure(struct dw_hdmi *hdmi,
+-				   const struct dw_hdmi_plat_data *pdata,
+-				   unsigned long mpixelclock)
+-{
+-	static int phycount = 0;
+-	
+-	dw_hdmi_phy_i2c_write(hdmi, 0xa0,   IMX_HDMI_TX_PHY_CPCE_CTRL);
+-        dw_hdmi_phy_i2c_write(hdmi, 0x0a,   IMX_HDMI_TX_PHY_GMPCTRL);
+-        dw_hdmi_phy_i2c_write(hdmi, 0x06dc, IMX_HDMI_TX_PHY_CURRCTRL);
+-
+-        dw_hdmi_phy_i2c_write(hdmi, 0x00,   IMX_HDMI_TX_PHY_PLLPHBYCTRL);
+-        dw_hdmi_phy_i2c_write(hdmi, 0x08,   IMX_HDMI_TX_PHY_MSM_CTRL);
+-
+-        dw_hdmi_phy_i2c_write(hdmi, 0x04,   IMX_HDMI_TX_PHY_TXTERM);
+-        dw_hdmi_phy_i2c_write(hdmi, 0x800d, IMX_HDMI_TX_PHY_CKSYMTXCTRL);
+-        dw_hdmi_phy_i2c_write(hdmi, 0x014a, IMX_HDMI_TX_PHY_VLEVCTRL);
+-
+-        /* Override and disable clock termination. */
+-        dw_hdmi_phy_i2c_write(hdmi, HDMI_3D_TX_PHY_CKCALCTRL_OVERRIDE,
+-                              		    IMX_HDMI_TX_PHY_CKCALCTRL);
+-	
+-	if(++phycount == 2){
+-		tc358870_hdmi_setup();
+-		phycount = 0;
+-	}
+-
+-	return 0;
+-}
+-
+ static struct dw_hdmi_plat_data imx6q_hdmi_drv_data = {
+ 	.mpll_cfg   = imx_mpll_cfg,
+ 	.cur_ctr    = imx_cur_ctr,
+ 	.phy_config = imx_phy_config,
+ 	.mode_valid = imx6q_hdmi_mode_valid,
+-	.configure_phy = imx_hdmi_phy_configure,
+ };
+ 
+ static struct dw_hdmi_plat_data imx6dl_hdmi_drv_data = {
+@@ -259,7 +180,6 @@ static struct dw_hdmi_plat_data imx6dl_hdmi_drv_data = {
+ 	.cur_ctr  = imx_cur_ctr,
+ 	.phy_config = imx_phy_config,
+ 	.mode_valid = imx6dl_hdmi_mode_valid,
+-	.configure_phy = imx_hdmi_phy_configure,
+ };
+ 
+ static const struct of_device_id dw_hdmi_imx_dt_ids[] = {
+diff --git a/drivers/media/i2c/tc358870.c b/drivers/media/i2c/tc358870.c
+index 0bd711d85154..82bd1a5df3b8 100644
+--- a/drivers/media/i2c/tc358870.c
++++ b/drivers/media/i2c/tc358870.c
+@@ -165,6 +165,8 @@ static void tc358870_initial_setup(struct tc358870_state *state)
+ {
+ 	struct i2c_client *client = state->i2c_client;
+ 	int sys_freq, i;
++	u32 data_idle_ctr;
++	int retries = 0;
+ 	static u8 edid_data[256] = {
+ 		0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+ 		0x52, 0x62, 0x88, 0x88, 0x00, 0x88, 0x88, 0x88,
+@@ -202,48 +204,18 @@ static void tc358870_initial_setup(struct tc358870_state *state)
+ // Step 1 Software Reset
+ i2c_wr16(client,0x0004,0x0004); // ConfCtl0
+ i2c_wr16(client,0x0002,0x3F01); // SysCtl
+-i2c_wr16(client,0x0002,0x0080); // SysCtl
++i2c_wr16(client,0x0002,0x0000); // SysCtl
+ i2c_wr16(client,0x0006,0x0008); // ConfCtl1
+-i2c_wr16(client,0x0002,0x0000); // SysCtl -> unsleep
+ 
+ // Step 2 Set Ref Clock
+-i2c_wr16(client,0x8540,0x12C0); // SYS_FREQ0_1
+-i2c_wr8(client,0x8630,0x00); // LOCKDET_FREQ0
+-i2c_wr16(client,0x8631,0x0753); // LOCKDET_REF1_2
+-i2c_wr8(client,0x8670,0x02); // NCO_F0_MOD
+-i2c_wr16(client,0x8A0C,0x12C0); // CSC_SCLK0_1
+-
+-// Setp 3 HDMI PHY/EDID Control
+-i2c_wr8(client,0x8410,0x03); // PHY CTL
+-i2c_wr8(client,0x8413,0x3F); // PHY_ENB
+-i2c_wr8(client,0x8420,0x07); // EQ_BYPS
+-i2c_wr8(client,0x84F0,0x31); // APLL_CTL
+-i2c_wr8(client,0x84F4,0x01); // DDCIO_CTL
+-i2c_wr8(client,0x8543,0x02); // DDC_CTL
+-i2c_wr8(client,0x8A02,0x42); // VOUT_SYNC0
+-i2c_wr8(client,0x8544,0x11); // HPD_CTL
+-i2c_wr8(client,0x85E0,0x01); // EDID_MODE
+-i2c_wr16(client,0x85E3,0x0100); // EDID_LEN1_2
+-i2c_wr(client, 0x8C00, edid_data, 64);
+-i2c_wr(client, 0x8C40, edid_data + 0x40, 64);
+-i2c_wr(client, 0x8C80, edid_data + 0x80, 64);
+-i2c_wr(client, 0x8CC0, edid_data + 0xC0, 64);
+-i2c_wr8(client,0x854A,0x01); // INIT_END
+-
+-// Setp 4 Split Control
+-i2c_wr16(client,0x5000,0x0100); // STX0_CTL
+-i2c_wr16(client,0x500C,0x84E0); // STX0_FPX
+-i2c_wr16(client,0x5080,0x0100); // STX1_CTL
+-
+-// Setp 5 DSI-TX0 Transition Timing
+ i2c_wr32(client,0x0108,0x00000001); // DSI_TX_CLKEN
+ i2c_wr32(client,0x010C,0x00000001); // DSI_TX_CLKSEL
+-i2c_wr16(client,0x0002,0x0001); // ConfCtl1 -> sleep
+-mdelay(5);
++i2c_wr32(client,0x02A0,0x00000001); // MIPI_PLL_CONTROL
+ i2c_wr32(client,0x02AC,0x000090bf); //820Mbps MIPI_PLL_CNF
++mdelay(1);
+ i2c_wr32(client,0x02A0,0x00000003); // MIPI_PLL_CONTROL
+-mdelay(50);
+-i2c_wr16(client,0x0002,0x0000); // ConfCtl1 -> unsleep
++
++// Setp 3 DSI-TX0 Transition Timing
+ i2c_wr32(client,0x0118,0x00000014); // LANE_ENABLE
+ i2c_wr32(client,0x0120,0x00001770); // LINE_INIT_COUNT
+ i2c_wr32(client,0x0124,0x00000000); // HSTX_TO_COUNT
+@@ -281,63 +253,77 @@ i2c_wr32(client,0x0274,0x0000001F); // HSTXVREGEN
+ i2c_wr32(client,0x0278,0x00060007); // BTA_COUNT
+ i2c_wr32(client,0x027C,0x00000002); // DPHY_TX ADJUST
+ i2c_wr32(client,0x011C,0x00000001); // DSITX_START
++i2c_wr16(client,0x0500,0x0000); // CMD_SEL
++i2c_wr32(client,0x0110,0x00000006); // MODE_CONFIG
++msleep(15);
++
++// Setp 4 Split Control
++i2c_wr16(client,0x5000,0x0100); // STX0_CTL
++i2c_wr16(client,0x500C,0x84E0); // STX0_FPX
++i2c_wr16(client,0x5080,0x0100); // STX1_CTL
++
++// Setp 5 HDMI PHY/EDID Control
++i2c_wr8(client,0x8410,0x03); // PHY CTL
++i2c_wr8(client,0x8413,0x3F); // PHY_ENB
++i2c_wr8(client,0x8420,0x07); // EQ_BYPS
++i2c_wr8(client,0x84F0,0x31); // APLL_CTL
++i2c_wr8(client,0x84F4,0x01); // DDCIO_CTL
++
++i2c_wr16(client,0x8540,0x12C0); // SYS_FREQ0_1
++i2c_wr8(client,0x8630,0x00); // LOCKDET_FREQ0
++i2c_wr16(client,0x8631,0x0753); // LOCKDET_REF1_2
++i2c_wr8(client,0x8670,0x02); // NCO_F0_MOD
++i2c_wr16(client,0x8A0C,0x12C0); // CSC_SCLK0_1
+ 
+-// Interrupt Control (TOP level)
+-i2c_wr16(client,0x0014,0x0f3f);   // IntStatus
+-for(i = 0x8502; i <= 0x850b; i++) {
+-    if (i != 0x850a){
+-        i2c_wr8(client, i + 0x10, 0xff);
++for(i = 0x8512; i <= 0x851b; i++) {
++    if (i != 0x851a){
+         i2c_wr8(client, i, 0xff);
+     }
+ }
+-i2c_wr16(client,0x0016,0x0f3f);   // IntMask
++i2c_wr8(client, 0x851f, 0xff);
+ 
+-// Command Transmission Before Video Start
+-i2c_wr16(client,0x0500,0x0000); // CMD_SEL
+-i2c_wr32(client,0x0110,0x00000006); // MODE_CONFIG
+-mdelay(5);
++i2c_wr8(client, 0x850b, 0x00);
++i2c_wr8(client, 0x851b, 0xff);
++i2c_wr16(client,0x0014,0x05ff);   // IntStatus
++i2c_wr16(client,0x0016,0x05ff);   // IntMask
++
++i2c_wr8(client,0x85E0,0x01); // EDID_MODE
++i2c_wr16(client,0x85E3,0x0100); // EDID_LEN1_2
++i2c_wr(client, 0x8C00, edid_data, 64);
++i2c_wr(client, 0x8C40, edid_data + 0x40, 64);
++i2c_wr(client, 0x8C80, edid_data + 0x80, 64);
++i2c_wr(client, 0x8CC0, edid_data + 0xC0, 64);
++
++i2c_wr8(client,0x8A02,0x42); // VOUT_SYNC0
++i2c_wr8(client,0x8543,0x02); // DDC_CTL
++i2c_wr8(client,0x8544,0x11); // HPD_CTL
+ 
+-// Start Video TX
+-i2c_wr16(client,0x0004,0x0C15); // ConfCtl0
++// Step 6 Audio
++i2c_wr8(client,0x8600,0x00);
++i2c_wr8(client,0x8602,0xF3);
++i2c_wr8(client,0x8603,0x02);
++i2c_wr8(client,0x8604,0x0C);
++i2c_wr8(client,0x8606,0x05);
++i2c_wr8(client,0x8607,0x00);
++i2c_wr8(client,0x8652,0x02);
++i2c_wr32(client,0x8671,0x020C49BA);
++i2c_wr32(client,0x8675,0x01E1B089);
++i2c_wr8(client,0x8680,0x00);
++
++// Step 7 Init End -> DCS Command 
++i2c_wr8(client,0x854A,0x01); // INIT_END
++i2c_wr16(client,0x0004,0x0C35); // ConfCtl0
+ i2c_wr16(client,0x0006,0x0000); // ConfCtl1
+-// Command Transmission After Video Start.
+ i2c_wr32(client,0x0110,0x00000016); // MODE_CONFIG
+-//i2c_wr32(client,0x0310,0x00000016); // MODE_CONFIG
+-//mdelay(1000);
+-//// MCAP
+-//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
+-//i2c_wr16(client,0x0504,0x00B0); // DCSCMD_Q
+-//delay_us(200);
+-//// Interface Setting
+-//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
+-//i2c_wr16(client,0x0504,0x14B3); // DCSCMD_Q
+-//delay_us(200);
+-//// MCAP
+-//i2c_wr16(client,0x0504,0x0023); // DCSCMD_Q
+-//i2c_wr16(client,0x0504,0x03B0); // DCSCMD_Q
+-//delay_us(200);
+-
+-//mdelay(1000);
+-
+-i2c_wr16(client,0x0504,0x0032); //	
+-i2c_wr16(client,0x0504,0x0000);
+-
+-//i2c_wr16(client,0x0504,0x0005);
+-//i2c_wr16(client,0x0504,0x0011);
+-//mdelay(120);
+-//// Set Display On
+-//i2c_wr16(client,0x0504,0x0005); // DCSCMD_Q
+-//i2c_wr16(client,0x0504,0x0029); // DCSCMD_Q
+-//mdelay(20);
++
+ }
+ 
+ static void tc358870_gpio_reset(struct tc358870_state *state)
+ {
+ 	gpiod_set_value(state->reset_gpio, 1);
+-	//usleep_range(1000, 2000);
+-	msleep(5);
++	usleep_range(1000, 2000);
+ 	gpiod_set_value(state->reset_gpio, 0);
+-	msleep(5);
++	usleep_range(1000, 2000);
+ }
+ 
+ static ssize_t
+@@ -382,46 +368,31 @@ void tc358870_hdmi_setup(void)
+ 	if(state == NULL) return;
+ 	
+ 	struct i2c_client *client = state->i2c_client;
+-#if 1
++
+ 	if (state->reset_gpio){
+ 		tc358870_gpio_reset(state);
+ 	}
+ 
+ 	tc358870_initial_setup(state);
+-	mdelay(10);
+-#else
+-	// Before Video TX
+-	i2c_wr16(client,0x0500,0x0004); // CMD_SEL
+-	i2c_wr32(client,0x0110,0x00000016); // MODE_CONFIG
+-	i2c_wr16(client,0x0504,0x0005);	// Soft Reset
+-	i2c_wr16(client,0x0504,0x0001);
+-	mdelay(5);
+-	i2c_wr16(client,0x0504,0x0005);	// Set Pixel Format
+-	i2c_wr16(client,0x0504,0x0001);
+-	udelay(200);
+-	
+-	// Start Video TX
+-	i2c_wr16(client,0x0004,0x0C15); // ConfCtl0
+-	i2c_wr16(client,0x0006,0x0000); // ConfCtl1
+-	
+-	// After Video TX
+-	i2c_wr32(client,0x0110,0x00000006); // MODE_CONFIG
+-	mdelay(32);
+-	i2c_wr16(client,0x0504,0x0005);	// MCAP
+-	i2c_wr16(client,0x0504,0x0001);
+-	mdelay(32);
+-	i2c_wr16(client,0x0504,0x0005);	// Interface Setting
+-	i2c_wr16(client,0x0504,0x0001);
+-	mdelay(32);
+-	i2c_wr16(client,0x0504,0x0005);	// MCAP
+-	i2c_wr16(client,0x0504,0x0001);
+-	mdelay(32);
+-	i2c_wr16(client,0x0504,0x0005);	// Display On
+-	i2c_wr16(client,0x0504,0x0001);
+-#endif
++
+ }
+ EXPORT_SYMBOL_GPL(tc358870_hdmi_setup);
+ 
++void tc358870_boe_setup(void)
++{
++	static int first_setup = 0;
++	u32 val;
++        struct tc358870_state *state = g_tc_state;
++        if(state == NULL) return;
++
++        struct i2c_client *client = state->i2c_client;
++	
++	msleep(500);
++	i2c_wr16(client,0x0504,0x0032);
++	i2c_wr16(client,0x0504,0x0000);
++}
++EXPORT_SYMBOL_GPL(tc358870_boe_setup);
++
+ static int tc358870_probe_of(struct tc358870_state *state)
+ {	
+ 	struct device *dev = &state->i2c_client->dev;
+@@ -444,9 +415,6 @@ static int tc358870_probe_of(struct tc358870_state *state)
+ 		return ret;
+ 	}
+ 
+-	if (state->reset_gpio)
+-		tc358870_gpio_reset(state);
+-
+ 	return 0;
+ }
+ 
+@@ -465,13 +433,13 @@ static int tc358870_probe(struct i2c_client *client,
+ 		return -ENOMEM;
+ 	
+ 	state->i2c_client = client;
+-	
++	/*
+ 	if(i2c_rd16(client, 0x0000) != 0x4700){
+ 		dev_info(&client->dev, "not a TC358870 on address 0x%x\n",
+ 			  client->addr << 1);
+ 		return -ENODEV;			
+ 	}
+-
++	*/
+ 	err = tc358870_probe_of(state);
+ 	if (err == -ENODEV)
+ 		dev_err(&client->dev, "No Device Tree data!\n");
+diff --git a/include/media/i2c/tc358870.h b/include/media/i2c/tc358870.h
+index 8cab385382a4..4b97c432e15c 100644
+--- a/include/media/i2c/tc358870.h
++++ b/include/media/i2c/tc358870.h
+@@ -1,4 +1,5 @@
+ #ifndef __TC358870_H__
+ #define __TC358870_H__
+ void tc358870_hdmi_setup(void);
++void tc358870_boe_setup(void);
+ #endif
+-- 
+2.17.1
+
