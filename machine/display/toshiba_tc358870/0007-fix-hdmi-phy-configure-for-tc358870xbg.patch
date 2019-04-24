@@ -283,7 +283,7 @@ index 0bd711d85154..82bd1a5df3b8 100644
 +i2c_wr(client, 0x8CC0, edid_data + 0xC0, 64);
 +
 +i2c_wr8(client,0x8A02,0x42); // VOUT_SYNC0
-+i2c_wr8(client,0x8543,0x02); // DDC_CTL
++i2c_wr8(client,0x8543,0x01); // DDC_CTL
 +i2c_wr8(client,0x8544,0x11); // HPD_CTL
  
 -// Start Video TX
