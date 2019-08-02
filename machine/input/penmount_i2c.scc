@@ -3,3 +3,4 @@ define KFEATURE_COMPATIBILITY board   
 
 kconf hardware penmount_i2c/penmount_i2c.cfg
 patch penmount_i2c/0001-Add-the-penmount-i2c-driver-for-the-touch-controler.patch
+patch penmount_i2c/0002-update-the-penmount-i2c-driver-to-fix-button-no-resp.patch
