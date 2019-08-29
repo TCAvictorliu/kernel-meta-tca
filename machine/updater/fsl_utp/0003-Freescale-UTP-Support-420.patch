@@ -124,9 +124,9 @@ index 043f97ad8f22..a36210d9f63f 100644
 +	 */
 +#ifdef CONFIG_FSL_UTP
 +	if (!is_utp_device(common->fsg))
-+		set_fs(get_ds());
++		set_fs(KERNEL_DS);
 +#else
-+	set_fs(get_ds());
++	set_fs(KERNEL_DS);
 +#endif
 +
  	/* The main loop */
