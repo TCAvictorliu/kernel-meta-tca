@@ -24,8 +24,8 @@ index f22cfbf9353e..94ca2f25e80c 100644
  }
  
 +static int imx_hdmi_phy_configure(struct dw_hdmi *hdmi,
-+				const struct dw_hdmi_plat_data *pdata,
-+				unsigned long mpixelclock)
++				   const struct dw_hdmi_plat_data *pdata,
++				   unsigned long mpixelclock)
 +{
 +	static int phycount = 0;
 +
