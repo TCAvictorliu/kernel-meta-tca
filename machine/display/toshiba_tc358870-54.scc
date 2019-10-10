@@ -2,10 +2,4 @@ define KFEATURE_DESCRIPTION "Toshiba TC358870 HDMI to MIPI DSI bridge"
 define KFEATURE_COMPATIBILITY board
 
 kconf hardware toshiba_tc358870/toshiba_tc358870.cfg
-patch toshiba_tc358870/0001-Toshiba-tc358870xbg-driver.patch
-patch toshiba_tc358870/0002-Toshiba-tc358870xbg-mode-setting-support.patch
-patch toshiba_tc358870/0003-Toshiba-tc358870xbg-mode-setting-fix.patch
-patch toshiba_tc358870/0004-Adaptation-i.MX6Q-dwhdmi-display-504.patch
-patch toshiba_tc358870/0005-fix-imx-to-tc358870-impedance-matching.patch
-patch toshiba_tc358870/0006-fix-imx-monitor-and-reinit-tc358870.patch
-patch toshiba_tc358870/0007-fix-hdmi-phy-configure-for-tc358870xbg.patch
+patch toshiba_tc358870/0001-fix-hdmi-phy-configure-for-tc358870xbg-54.patch
