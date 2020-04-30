@@ -103,9 +103,9 @@ index beb170b002dc..e1d7f5348b82 100644
  obj-$(CONFIG_VIDEO_OV2659)	+= ov2659.o
  obj-$(CONFIG_VIDEO_TC358743)	+= tc358743.o
 +obj-$(CONFIG_VIDEO_TC358870)	+= tc358870.o
+ obj-$(CONFIG_VIDEO_HI556)	+= hi556.o
  obj-$(CONFIG_VIDEO_IMX214)	+= imx214.o
  obj-$(CONFIG_VIDEO_IMX258)	+= imx258.o
- obj-$(CONFIG_VIDEO_IMX274)	+= imx274.o
 diff --git a/drivers/media/i2c/tc358870.c b/drivers/media/i2c/tc358870.c
 new file mode 100644
 index 000000000000..2a84b46662b1
