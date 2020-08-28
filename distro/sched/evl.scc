@@ -2,3 +2,4 @@ define KFEATURE_DESCRIPTION "Support EVL dual kernel architecture"
 define KFEATURE_COMPATIBILITY all
 
 kconf non-hardware evl.cfg
+kconf non-hardware dovetail.cfg
