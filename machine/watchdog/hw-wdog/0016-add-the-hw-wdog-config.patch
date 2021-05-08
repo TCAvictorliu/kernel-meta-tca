@@ -18,7 +18,7 @@ index 37460cd..6aa0696 100644
  
 +config HW_WATCHDOG
 +        bool "WatchDog for TCA HW"
-+        ---help---
++        help
 +          Say Y here if you want to use the new watchdog  driver.
 +          This driver provides for TCA CIDU platform.
 +

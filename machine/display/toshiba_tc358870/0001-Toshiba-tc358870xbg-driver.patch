@@ -22,7 +22,7 @@ index cee1dae6e014..ef07f0856002 100644
 +	tristate "Toshiba TC358870 bridge"
 +	depends on I2C
 +	select HDMI
-+	---help---
++	help
 +	  Support for the Toshiba TC358870 HDMI to MIPI DSI bridge.
 +
 +	  To compile this driver as a module, choose M here: the
